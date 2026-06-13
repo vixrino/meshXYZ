@@ -8,6 +8,9 @@ Quick-start
 # Validation batch (fast, ~30 min on Colab T4):
 python scripts/prep_objaverse.py --n 500 --out_dir /content/data/train --split train
 
+# With auto-quadrangulation (~2-4 h extra for N=500, cached to Drive afterward):
+python scripts/prep_objaverse.py --n 500 --out_dir /content/data/train --quadrangulate
+
 # Scale-up:
 python scripts/prep_objaverse.py --n 5000 --out_dir /content/data/train --split train
 
@@ -23,16 +26,14 @@ A mesh is kept when ALL conditions hold:
 
 Quad preference
 ---------------
-Objaverse objects come in many formats.  Only .obj files can carry native quad
-faces (all others are triangulated on export).  For .obj files we use our custom
-parse_obj; for .glb/.ply/etc. we fall back to trimesh (triangle-only).
-
-The manifest CSV contains a `quad_frac` column — sort by this descending to find
-the most quad-rich objects for targeted quad training.
+Objaverse exports are all triangulated GLB/GLTF (no native quad faces).
+Use --quadrangulate to run pymeshlab cross-field quadrangulation on each mesh.
+This converts triangle meshes to quad-dominant .obj files (~10-30 s/mesh).
+On failure QuadriFlow keeps the original triangle mesh and logs a warning.
 
 Manifest columns
 ----------------
-uid, local_path, format, n_tri, n_quad, quad_frac, kept
+uid, local_path, format, n_tri, n_quad, quad_frac, kept, quadrangulated
 """
 
 from __future__ import annotations
@@ -54,8 +55,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # ── Filtering thresholds ──────────────────────────────────────────────────────
 MIN_FACES = 50
 MAX_FACES = 2000
-# Fraction of quads needed to tag a mesh as "quad-rich" (informational only).
-QUAD_RICH_THRESHOLD = 0.10
+# Quad-frac bucket boundaries for the summary printout.
+QUAD_HIGH   = 0.50   # >50% quads  → "high"
+QUAD_MEDIUM = 0.10   # 10-50% quads → "medium"
+# <10% quads → "low"
 
 
 def analyse_mesh(path: str) -> dict:
@@ -79,9 +82,61 @@ def analyse_mesh(path: str) -> dict:
         log.debug("Failed to parse %s: %s", path, exc)
         return {}
 
-    n_total  = n_tri + n_quad
+    n_total   = n_tri + n_quad
     quad_frac = n_quad / max(n_total, 1)
     return {"n_tri": n_tri, "n_quad": n_quad, "n_total": n_total, "quad_frac": quad_frac}
+
+
+def quadrangulate_mesh(src_path: str, dst_path: str, target_faces: int) -> dict | None:
+    """Convert a triangle mesh to quad-dominant using pymeshlab cross-field quadrangulation.
+
+    Saves the result as a .obj file at dst_path.  Returns updated topology stats
+    on success, None on failure (caller should fall back to the original triangle mesh).
+
+    Parameters
+    ----------
+    src_path : str
+        Input mesh path (any format trimesh can load).
+    dst_path : str
+        Output .obj path (will be overwritten).
+    target_faces : int
+        Approximate target quad face count passed to the quadrangulation filter.
+        Rule of thumb: n_tri // 2, since one quad ≈ two triangles in area.
+    """
+    try:
+        import pymeshlab  # noqa: PLC0415
+    except ImportError:
+        log.warning("pymeshlab not installed; skipping quadrangulation.  Run: pip install pymeshlab")
+        return None
+
+    try:
+        ms = pymeshlab.MeshSet()
+        ms.load_new_mesh(src_path)
+
+        n_in = ms.current_mesh().face_number()
+        if n_in == 0:
+            log.warning("Empty mesh at %s; skipping quadrangulation.", src_path)
+            return None
+
+        # Step 1: cross-field creation (required before quadrangulation).
+        ms.meshing_cross_field_creation()
+
+        # Step 2: global greedy quadrangulation targeting ~n_tri/2 quads.
+        ms.meshing_quadrangulation_global_greedy(targetcount=max(4, target_faces))
+
+        ms.save_current_mesh(dst_path)
+
+    except Exception as exc:
+        log.warning("Quadrangulation failed on %s: %s", Path(src_path).name, exc)
+        return None
+
+    # Re-analyse the saved .obj to get updated counts.
+    stats = analyse_mesh(dst_path)
+    if not stats:
+        log.warning("Could not re-parse quadrangulated mesh at %s; discarding.", dst_path)
+        return None
+
+    return stats
 
 
 def download_and_filter(
@@ -89,8 +144,16 @@ def download_and_filter(
     out_dir: str,
     seed: int = 42,
     processes: int = 4,
+    quadrangulate: bool = False,
 ) -> list[dict]:
     """Download N Objaverse objects and filter by topology.
+
+    Parameters
+    ----------
+    quadrangulate : bool
+        When True, run pymeshlab cross-field quadrangulation on every kept mesh
+        before saving.  Output is always saved as .obj.  Falls back to triangle
+        mesh on quadrangulation failure.
 
     Returns a list of manifest rows (dict per mesh).
     """
@@ -135,11 +198,13 @@ def download_and_filter(
 
     rows: list[dict] = []
     n_kept = 0
+    n_quad_success = 0
 
     for uid, src_path in uid_to_path.items():
         if src_path is None or not Path(src_path).exists():
             rows.append({"uid": uid, "local_path": "", "format": "", "n_tri": 0,
-                         "n_quad": 0, "quad_frac": 0.0, "kept": False})
+                         "n_quad": 0, "quad_frac": 0.0, "kept": False,
+                         "quadrangulated": False})
             continue
 
         ext   = Path(src_path).suffix.lower()
@@ -147,38 +212,67 @@ def download_and_filter(
 
         if not stats:
             rows.append({"uid": uid, "local_path": src_path, "format": ext,
-                         "n_tri": 0, "n_quad": 0, "quad_frac": 0.0, "kept": False})
+                         "n_tri": 0, "n_quad": 0, "quad_frac": 0.0, "kept": False,
+                         "quadrangulated": False})
             continue
 
         n_total   = stats["n_total"]
-        quad_frac = stats["quad_frac"]
         keep = MIN_FACES <= n_total <= MAX_FACES
 
+        was_quadrangulated = False
         if keep:
-            # Copy into output directory using uid as filename to avoid collisions.
-            dst = out_path / f"{uid}{ext}"
-            shutil.copy2(src_path, dst)
+            if quadrangulate:
+                # Always save output as .obj (the only format that preserves quads).
+                dst = out_path / f"{uid}.obj"
+                target_faces = max(4, stats["n_tri"] // 2)
+                new_stats = quadrangulate_mesh(src_path, str(dst), target_faces)
+                if new_stats:
+                    stats = new_stats
+                    was_quadrangulated = True
+                    n_quad_success += 1
+                    log.info(
+                        "  [%d/%d] Quadrangulated %s → %d tri + %d quad (%.0f%% quad)",
+                        n_kept + 1, n, uid,
+                        stats["n_tri"], stats["n_quad"], stats["quad_frac"] * 100,
+                    )
+                else:
+                    # Quadrangulation failed — fall back to triangle original.
+                    shutil.copy2(src_path, dst)
+                    log.warning("  Kept original triangle mesh for %s", uid)
+            else:
+                dst = out_path / f"{uid}{ext}"
+                shutil.copy2(src_path, dst)
+
             n_kept += 1
 
         rows.append({
-            "uid":        uid,
-            "local_path": str(dst) if keep else src_path,
-            "format":     ext,
-            "n_tri":      stats["n_tri"],
-            "n_quad":     stats["n_quad"],
-            "quad_frac":  round(quad_frac, 4),
-            "kept":       keep,
+            "uid":             uid,
+            "local_path":      str(dst) if keep else src_path,
+            "format":          ".obj" if (keep and quadrangulate) else ext,
+            "n_tri":           stats["n_tri"],
+            "n_quad":          stats["n_quad"],
+            "quad_frac":       round(stats["quad_frac"], 4),
+            "kept":            keep,
+            "quadrangulated":  was_quadrangulated,
         })
 
         if len(rows) % 50 == 0:
             log.info("  Processed %d / %d — kept %d so far", len(rows), len(uid_to_path), n_kept)
 
-    log.info("Done.  %d / %d objects passed filters.", n_kept, len(uid_to_path))
+    if quadrangulate:
+        log.info(
+            "Done.  %d / %d objects passed filters; %d / %d quadrangulated successfully.",
+            n_kept, len(uid_to_path), n_quad_success, n_kept,
+        )
+    else:
+        log.info("Done.  %d / %d objects passed filters.", n_kept, len(uid_to_path))
+
     return rows
 
 
 def write_manifest(rows: list[dict], manifest_path: str) -> None:
-    fieldnames = ["uid", "local_path", "format", "n_tri", "n_quad", "quad_frac", "kept"]
+    fieldnames = ["uid", "local_path", "format", "n_tri", "n_quad",
+                  "quad_frac", "kept", "quadrangulated"]
     with open(manifest_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -187,36 +281,58 @@ def write_manifest(rows: list[dict], manifest_path: str) -> None:
 
 
 def print_summary(rows: list[dict]) -> None:
-    kept  = [r for r in rows if r["kept"]]
-    quads = [r for r in kept if float(r["quad_frac"]) >= QUAD_RICH_THRESHOLD]
+    kept = [r for r in rows if r["kept"]]
     if not kept:
         log.warning("No meshes kept — check filter thresholds or download errors.")
         return
+
+    quad_fracs = [float(r["quad_frac"]) for r in kept]
+    high   = [qf for qf in quad_fracs if qf > QUAD_HIGH]
+    medium = [qf for qf in quad_fracs if QUAD_MEDIUM <= qf <= QUAD_HIGH]
+    low    = [qf for qf in quad_fracs if qf < QUAD_MEDIUM]
+
     avg_tri  = sum(int(r["n_tri"])  for r in kept) / len(kept)
     avg_quad = sum(int(r["n_quad"]) for r in kept) / len(kept)
-    avg_qf   = sum(float(r["quad_frac"]) for r in kept) / len(kept)
-    print("\n── Dataset summary ──────────────────────────────────────")
-    print(f"  Objects kept      : {len(kept)}")
-    print(f"  Avg tri faces     : {avg_tri:.0f}")
-    print(f"  Avg quad faces    : {avg_quad:.0f}")
-    print(f"  Avg quad fraction : {avg_qf:.2%}")
-    print(f"  Quad-rich objects : {len(quads)} ({len(quads)/len(kept):.1%}) [≥{QUAD_RICH_THRESHOLD:.0%} quads]")
-    print(f"  Formats           : { {r['format'] for r in kept} }")
-    print("─" * 58)
+    avg_qf   = sum(quad_fracs) / len(quad_fracs)
+    n_quadrangulated = sum(1 for r in kept if r.get("quadrangulated"))
+
+    print("\n── Dataset summary ──────────────────────────────────────────")
+    print(f"  Objects kept          : {len(kept)}")
+    print(f"  Avg tri faces         : {avg_tri:.0f}")
+    print(f"  Avg quad faces        : {avg_quad:.0f}")
+    print(f"  Avg quad fraction     : {avg_qf:.2%}")
+    if n_quadrangulated:
+        print(f"  Quadrangulated (ok)   : {n_quadrangulated} / {len(kept)}"
+              f"  ({n_quadrangulated / len(kept):.1%})")
+    print()
+    print(f"  quad_frac distribution (among {len(kept)} kept meshes):")
+    print(f"    > 50% quads  (high)   : {len(high):4d}  ({len(high)/len(kept):.1%})")
+    print(f"    10–50% quads (medium) : {len(medium):4d}  ({len(medium)/len(kept):.1%})")
+    print(f"    < 10% quads  (low)    : {len(low):4d}  ({len(low)/len(kept):.1%})")
+    print(f"  Formats               : { {r['format'] for r in kept} }")
+    print("─" * 62)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare Objaverse dataset for mesh_genai quad training.")
-    parser.add_argument("--n",         type=int, default=500,
+    parser = argparse.ArgumentParser(
+        description="Prepare Objaverse dataset for mesh_genai quad training.")
+    parser.add_argument("--n",             type=int, default=500,
                         help="Number of objects to attempt to download (default 500).")
-    parser.add_argument("--out_dir",   default="/content/data/train",
+    parser.add_argument("--out_dir",       default="/content/data/train",
                         help="Directory where accepted meshes are copied.")
-    parser.add_argument("--manifest",  default=None,
+    parser.add_argument("--manifest",      default=None,
                         help="Path for manifest CSV (default: <out_dir>/manifest.csv).")
-    parser.add_argument("--seed",      type=int, default=42)
-    parser.add_argument("--processes", type=int, default=4,
+    parser.add_argument("--seed",          type=int, default=42)
+    parser.add_argument("--processes",     type=int, default=4,
                         help="Parallel download processes.")
-    parser.add_argument("--split",     choices=["train", "val"], default="train")
+    parser.add_argument("--split",         choices=["train", "val"], default="train")
+    parser.add_argument("--quadrangulate", action="store_true", default=False,
+                        help=(
+                            "Run pymeshlab cross-field quadrangulation on each triangle mesh "
+                            "before saving (~10-30 s/mesh).  Output is saved as .obj.  "
+                            "Falls back to original triangle mesh on failure.  "
+                            "Requires: pip install pymeshlab"
+                        ))
     args = parser.parse_args()
 
     manifest_path = args.manifest or os.path.join(args.out_dir, "manifest.csv")
@@ -226,6 +342,7 @@ def main() -> None:
         out_dir=args.out_dir,
         seed=args.seed,
         processes=args.processes,
+        quadrangulate=args.quadrangulate,
     )
     write_manifest(rows, manifest_path)
     print_summary(rows)
