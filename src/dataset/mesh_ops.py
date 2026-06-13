@@ -376,6 +376,22 @@ def process_mesh(
     )
 
     face_seq_12, _  = _to_unified_12_tokens(seq_tri, seq_quad, TRI_PAD)
+
+    # Global ZYX sort: order all faces by their first real vertex's ZYX key.
+    # Triangle first real vertex is at tokens [3,4,5] = [x,y,z]; quad at [0,1,2].
+    # ZYX key = z*B² + y*B + x, matching the intra-face canonicalization key.
+    # This interleaves tri and quad faces spatially (instead of a rigid tri-then-quad
+    # block), producing diverse quad→tri and tri→quad context transitions for the
+    # autoregressive decoder to learn face-type distinction.
+    if len(face_seq_12) > 1:
+        _B     = int(QUANT_MAX) + 1
+        _is_t  = face_seq_12[:, 0] == TRI_PAD
+        _x     = np.where(_is_t, face_seq_12[:, 3], face_seq_12[:, 0])
+        _y     = np.where(_is_t, face_seq_12[:, 4], face_seq_12[:, 1])
+        _z     = np.where(_is_t, face_seq_12[:, 5], face_seq_12[:, 2])
+        _keys  = _z.astype(np.int64) * _B * _B + _y.astype(np.int64) * _B + _x.astype(np.int64)
+        face_seq_12 = face_seq_12[np.argsort(_keys, kind="stable")]
+
     face_neighbors  = build_edge_adjacency_unified(face_seq_12)
 
     return pc, face_seq_12, face_neighbors

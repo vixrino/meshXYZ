@@ -3,14 +3,19 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from ..constants import EOS_RESIDUAL
+from ..constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_PAD
 
 
 def valid_row_mask(
-    faces: Int[Tensor, "batch faces 9"],
+    faces: Int[Tensor, "batch faces n_face_tokens"],
     pad_value: int = 128,
 ) -> Bool[Tensor, "batch faces"]:
-    """Returns True for real face rows, False for collate_fn padding rows."""
+    """Returns True for real face rows, False for collate_fn padding rows.
+
+    The collate_fn fills padding rows with EOS_COORD (128).  Since TRI_PAD=129
+    and all real coordinates are in [0, QUANT_MAX=127], no real face row can
+    ever have all tokens equal to 128.  Works for both 9-token and 12-token faces.
+    """
     return ~(faces == pad_value).all(dim=-1)
 
 
@@ -93,3 +98,91 @@ def compute_metrics(
     perc_eos  = (valid & eos).float().sum() / n_valid
 
     return {"coord_acc": coord_acc, "coord_mae": coord_mae, "face_acc": face_acc, "eos_acc": eos_acc, "perc_eos": perc_eos}
+
+
+def decompose_loss(
+    logits: Float[Tensor, "batch faces n_face_tokens vocab"],
+    targets: Int[Tensor, "batch faces n_face_tokens"],
+    faces: "Int[Tensor, 'batch faces n_face_tokens'] | None" = None,
+    pad_value: int = PAD_TARGET,
+) -> dict[str, "Float[Tensor, '']"]:
+    """Split reconstruction_loss into three disjoint components by target token value.
+
+    Decomposition (ranges are disjoint because TRI_PAD=129 > QUANT_MAX=127 and
+    EOS_RESIDUAL=255 > TRI_PAD, so the three masks never overlap):
+
+        target == TRI_PAD (129)          → loss_tri_pad   (positions 0-2 of tri-target faces)
+        target in [0, QUANT_MAX] (0-127) → loss_coord     (coord slots of both tri and quad faces)
+        target == EOS_RESIDUAL (255)     → loss_eos       (faces without a next neighbor)
+        target == PAD_TARGET (-1)        → ignored        (collate padding rows or masked positions)
+
+    Weighted by their token counts, the three components sum to reconstruction_loss.
+    Each component uses mean-over-valid-tokens reduction, so the values are
+    comparable in magnitude even when one category has very few positions.
+
+    Expected training dynamics:
+        loss_tri_pad: drops fast (model learns the deterministic TRI_PAD prefix in ~20 steps)
+        loss_coord:   drops more slowly as the model learns geometry
+        loss_eos:     typically low and stable (few EOS positions)
+    """
+    if faces is not None:
+        targets = targets.clone()
+        targets[~valid_row_mask(faces)] = pad_value
+
+    vocab_size  = logits.shape[-1]
+    logits_flat = logits.reshape(-1, vocab_size)
+    tgt_flat    = targets.reshape(-1)
+
+    def _ce(mask: Bool[Tensor, "n"]) -> "Float[Tensor, '']":
+        """Cross-entropy restricted to positions where mask is True."""
+        t = tgt_flat.clone()
+        t[~mask] = pad_value
+        return (
+            F.cross_entropy(logits_flat, t, ignore_index=pad_value, reduction="sum")
+            / mask.sum().clamp(min=1)
+        )
+
+    return {
+        "loss_tri_pad": _ce(tgt_flat == TRI_PAD),
+        "loss_coord":   _ce((tgt_flat >= 0) & (tgt_flat <= QUANT_MAX)),
+        "loss_eos":     _ce(tgt_flat == EOS_RESIDUAL),
+    }
+
+
+def face_type_acc(
+    logits: Float[Tensor, "batch faces n_face_tokens vocab"],
+    targets: Int[Tensor, "batch faces n_face_tokens"],
+    faces: "Int[Tensor, 'batch faces n_face_tokens'] | None" = None,
+    pad_value: int = PAD_TARGET,
+) -> "Float[Tensor, '']":
+    """Fraction of real non-EOS faces where the model correctly predicts the face type.
+
+    Face type is determined from position 0 of the *target* (the face to predict):
+        target[0] == TRI_PAD (129)       → triangle target; correct if argmax(logits[0]) == TRI_PAD
+        target[0] in [0, QUANT_MAX=127]  → quad target;    correct if argmax(logits[0]) <= QUANT_MAX
+
+    EOS faces (any target position is EOS_RESIDUAL) and padding rows are excluded.
+
+    This is the primary sanity check that the model has learned the topology
+    distinction: TRI_PAD at position 0 means "the next face is a triangle; fill
+    positions 0-2 with pad tokens before predicting the 3 vertices".
+    """
+    if faces is not None:
+        targets = targets.clone()
+        targets[~valid_row_mask(faces)] = pad_value
+
+    tgt0  = targets[:, :, 0]                                    # (B, F)
+    valid = tgt0 != pad_value                                    # non-padding rows
+
+    is_eos         = (targets == EOS_RESIDUAL).any(dim=-1) & valid
+    is_tri_target  = (tgt0 == TRI_PAD)                & valid & ~is_eos
+    is_quad_target = (tgt0 >= 0) & (tgt0 <= QUANT_MAX) & valid & ~is_eos
+
+    pred0 = logits[:, :, 0].argmax(-1)                          # (B, F) argmax at position 0
+
+    tri_correct  = (pred0 == TRI_PAD)   & is_tri_target
+    quad_correct = (pred0 <= QUANT_MAX) & is_quad_target
+
+    n_typed   = (is_tri_target | is_quad_target).float().sum().clamp(min=1)
+    n_correct = (tri_correct   | quad_correct  ).float().sum()
+    return n_correct / n_typed

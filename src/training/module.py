@@ -8,7 +8,7 @@ from lightning.pytorch.loggers import WandbLogger
 from ..dataset.types import Batch
 from ..model.mesh_transformer import MeshTransformer, MeshTransformerCfg
 from .config import TrainingCfg
-from .loss import compute_metrics, reconstruction_loss, valid_row_mask
+from .loss import compute_metrics, decompose_loss, face_type_acc, reconstruction_loss, valid_row_mask
 from .optimizer import build_optimizer
 from .strategy import MaskingPipeline, OrderingPipeline, TargetBuilder
 from ..utils.viz import save_generation_video, save_prediction_grid
@@ -46,6 +46,13 @@ class MeshTransformerModule(LightningModule):
         metrics = compute_metrics(logits, targets, faces=batch["faces"])
         self.log("train/loss", loss, prog_bar=False, on_step=True, on_epoch=False)
         self.log_dict({f"train/{k}": v for k, v in metrics.items()}, prog_bar=False, on_step=True, on_epoch=False)
+
+        # Phase-4 metrics: loss components + face-type accuracy
+        decomposed    = decompose_loss(logits, targets, faces=batch["faces"])
+        ftype_acc     = face_type_acc(logits, targets, faces=batch["faces"])
+        self.log_dict({f"train/{k}": v for k, v in decomposed.items()}, prog_bar=False, on_step=True, on_epoch=False)
+        self.log("train/face_type_acc", ftype_acc, prog_bar=False, on_step=True, on_epoch=False)
+
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
