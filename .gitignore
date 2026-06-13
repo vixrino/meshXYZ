@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific
+wandb/
+*.ckpt
+.DS_Store
+encoder_weights/
+data/
