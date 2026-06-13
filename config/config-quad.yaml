@@ -9,6 +9,7 @@ decoder:
   n_heads: 6
   max_faces: 2048
   vocab_size: 257          # 256 + 1 for TRI_PAD=129
+  n_face_tokens: 12        # unified 12-token block (3 TRI_PAD + 9 coords for tri; 12 coords for quad)
   use_pos_embed: false
   use_spherical_embed: false  # face_cartesian_to_spherical expects 9-coord input; 12-coord not supported
   relative: false          # relative mode anchors on face_input[:,:,:3]; TRI_PAD=129 there is not a coord

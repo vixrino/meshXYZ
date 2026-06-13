@@ -4,6 +4,8 @@ import torch
 from jaxtyping import Float, Int
 from torch import Tensor
 
+from ..constants import QUANT_MAX, TRI_PAD
+
 _SQRT3 = math.sqrt(3)
 
 
@@ -41,3 +43,41 @@ def canonical_face(verts: Int[Tensor, "3 3"]) -> Int[Tensor, "9"]:
     keys = [(int(v[2]), int(v[1]), int(v[0])) for v in verts]
     min_idx = keys.index(min(keys))
     return torch.roll(verts, -min_idx, dims=0).reshape(9)
+
+
+def canonical_face_12(face12: Int[Tensor, "12"]) -> Int[Tensor, "12"]:
+    """Canonicalize a 12-token unified face (triangle or quad) for use in generate().
+
+    Face-type oracle: token[0].
+        token[0] > QUANT_MAX (127)  →  triangle  (TRI_PAD was predicted)
+        token[0] ≤ QUANT_MAX (127)  →  quad       (real coordinate predicted)
+
+    Triangle canonicalization
+        Positions 0-2 are forced to TRI_PAD regardless of what was predicted there.
+        Positions 3-11 are clamped to [0, QUANT_MAX] and the three vertices are
+        rotated so the ZYX-lexicographic minimum vertex is first.
+
+    Quad canonicalization
+        All 12 positions are clamped to [0, QUANT_MAX] and the four vertices are
+        rotated so the ZYX-lexicographic minimum vertex is first.
+
+    Inconsistent TRI_PAD positions
+        token[0] is the sole oracle.  Example: token[0]=coord, token[1]=TRI_PAD
+        → treated as quad; the rogue TRI_PAD is clamped to QUANT_MAX (127).
+        Example: token[0]=TRI_PAD, token[2]=coord → treated as triangle;
+        positions 0-2 are forced to TRI_PAD.
+
+    Winding order is preserved (cyclic rotation only, no flip).
+    """
+    if face12[0].item() > QUANT_MAX:                       # triangle
+        coord_tokens = face12[3:].clamp(0, QUANT_MAX).reshape(3, 3)
+        keys    = [(int(v[2]), int(v[1]), int(v[0])) for v in coord_tokens]
+        min_idx = keys.index(min(keys))
+        rotated = torch.roll(coord_tokens, -min_idx, dims=0).reshape(9)
+        pad     = face12.new_full((3,), TRI_PAD)
+        return torch.cat([pad, rotated])
+    else:                                                   # quad
+        coord_tokens = face12.clamp(0, QUANT_MAX).reshape(4, 3)
+        keys    = [(int(v[2]), int(v[1]), int(v[0])) for v in coord_tokens]
+        min_idx = keys.index(min(keys))
+        return torch.roll(coord_tokens, -min_idx, dims=0).reshape(12)

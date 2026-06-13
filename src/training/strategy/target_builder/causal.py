@@ -38,6 +38,7 @@ class CausalTargetBuilder(BaseTargetBuilder):
         has_next  = next_idx < N
         safe_next = next_idx.clamp(0, N - 1)
 
-        tgt_coords = faces.gather(1, safe_next.unsqueeze(-1).expand(B, N, 9))
-        eos        = torch.full((B, N, 9), EOS_RESIDUAL, dtype=faces.dtype, device=device)
+        n_coords   = faces.shape[-1]   # 9 (tri-only) or 12 (unified quad/tri)
+        tgt_coords = faces.gather(1, safe_next.unsqueeze(-1).expand(B, N, n_coords))
+        eos        = torch.full((B, N, n_coords), EOS_RESIDUAL, dtype=faces.dtype, device=device)
         return torch.where(has_next.unsqueeze(-1), tgt_coords, eos), None
