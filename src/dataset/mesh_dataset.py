@@ -1,6 +1,7 @@
 import glob
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import torch
@@ -47,6 +48,9 @@ class DataCfg:
     num_points: int = 2048
     num_workers: int = 4
     augment: bool = False
+    face_layout: Literal["tri", "quad"] = "tri"
+    # "tri": triangle-only mode (default, fully backward-compatible)
+    # "quad": QuadGPT unified 12-token block (Phase 2+)
 
 
 def quantize_vertices(verts: np.ndarray) -> np.ndarray:
