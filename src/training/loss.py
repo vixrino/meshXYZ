@@ -1,0 +1,95 @@
+import torch
+import torch.nn.functional as F
+from jaxtyping import Bool, Float, Int
+from torch import Tensor
+
+from ..constants import EOS_RESIDUAL
+
+
+def valid_row_mask(
+    faces: Int[Tensor, "batch faces 9"],
+    pad_value: int = 128,
+) -> Bool[Tensor, "batch faces"]:
+    """Returns True for real face rows, False for collate_fn padding rows."""
+    return ~(faces == pad_value).all(dim=-1)
+
+
+def reconstruction_loss(
+    logits: Float[Tensor, "batch faces n_coords vocab"],
+    targets: Int[Tensor, "batch faces n_coords"],
+    faces: Int[Tensor, "batch faces 9"] | None = None,
+    pad_value: int = -1,
+) -> Float[Tensor, ""]:
+    """Cross-entropy loss over coordinate predictions.
+
+    targets == pad_value (-1) → face is fully excluded from the loss.
+    targets == EOS_RESIDUAL (255) → face is trained to predict EOS.
+    """
+    if faces is not None:
+        targets = targets.clone()
+        targets[~valid_row_mask(faces)] = pad_value
+    vocab_size   = logits.shape[-1]
+    logits_flat  = logits.reshape(-1, vocab_size)
+    targets_flat = targets.reshape(-1)
+    # ignore_index handles empty valid sets inside the CUDA kernel — no CPU-GPU sync.
+    loss    = F.cross_entropy(logits_flat, targets_flat, ignore_index=pad_value, reduction="sum")
+    n_valid = (targets_flat != pad_value).sum().clamp(min=1)
+    return loss / n_valid
+
+
+def compute_metrics(
+    logits: Float[Tensor, "batch faces n_coords vocab"],
+    targets: Int[Tensor, "batch faces n_coords"],
+    faces: Int[Tensor, "batch faces 9"] | None = None,
+    pad_value: int = -1,
+) -> dict[str, Float[Tensor, ""]]:
+    """
+    Returns:
+        coord_acc:  fraction of individual non-PAD coordinates predicted exactly right (EOS excluded)
+        coord_mae:  mean absolute error in quantization steps (EOS faces excluded)
+        face_acc:   fraction of non-EOS faces where all non-PAD coords are correct
+        eos_acc:    fraction of EOS faces where model correctly predicts EOS on non-PAD coords
+    Padded faces (all targets == pad_value) and PAD_TARGET positions within a face are excluded.
+
+    Compatible with both modes:
+      - use_edge_cond=False: all 9 target positions are real coords or EOS_RESIDUAL.
+      - use_edge_cond=True:  positions 0-5 are pad_value (edge, not predicted);
+                             positions 6-8 are the new-vertex target or EOS_RESIDUAL.
+    """
+    if faces is not None:
+        targets = targets.clone()
+        targets[~valid_row_mask(faces)] = pad_value
+
+    # Face-level validity: a face is valid if not ALL positions are pad_value.
+    valid   = ~(targets == pad_value).all(dim=-1)          # (B, F)
+    n_valid = valid.float().sum().clamp(min=1)
+
+    preds = logits.argmax(-1)                              # (B, F, n_coords)
+
+    # EOS detection: any non-PAD coord equals EOS_RESIDUAL (works for both modes).
+    non_pad = targets != pad_value                         # (B, F, n_coords)
+    eos     = (non_pad & (targets == EOS_RESIDUAL)).any(dim=-1)  # (B, F)
+
+    coord_valid  = valid & ~eos                            # (B, F) — real coordinate rows
+    n_coord      = coord_valid.float().sum().clamp(min=1)
+    n_eos        = (valid & eos).float().sum().clamp(min=1)
+
+    # Per-position mask: valid face, not EOS, and not a PAD position.
+    coord_pos_valid = coord_valid.unsqueeze(-1) & non_pad  # (B, F, n_coords)
+    n_coord_pos     = coord_pos_valid.float().sum().clamp(min=1)
+
+    coord_correct = (preds == targets) & coord_pos_valid   # (B, F, n_coords)
+    coord_acc     = coord_correct.float().sum() / n_coord_pos
+
+    mae_mask  = coord_pos_valid & (preds != EOS_RESIDUAL) & (targets != EOS_RESIDUAL)
+    n_mae     = mae_mask.float().sum().clamp(min=1)
+    coord_mae = ((preds - targets).abs().float() * mae_mask).sum() / n_mae
+
+    # face_acc: all non-PAD coords correct (PAD positions treated as "don't care").
+    face_acc  = (coord_correct | ~coord_pos_valid).all(dim=-1)
+    face_acc  = (face_acc & coord_valid).float().sum() / n_coord
+
+    eos_acc   = ((preds == EOS_RESIDUAL).any(dim=-1) & valid & eos).float().sum() / n_eos
+    perc_eos  = (valid & eos).float().sum() / n_valid
+
+    return {"coord_acc": coord_acc, "coord_mae": coord_mae, "face_acc": face_acc, "eos_acc": eos_acc, "perc_eos": perc_eos}

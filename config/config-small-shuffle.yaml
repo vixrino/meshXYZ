@@ -1,0 +1,65 @@
+encoder:
+  latent_dim: 8
+  weights_path: /encoder-path.pth # download it here https://drive.google.com/file/d/1qX_YTMAE2tLFppJps3vKAWFbFZgE9CtQ/view?usp=drive_link
+
+decoder:
+  d_latent: 8
+  d_hidden: 384
+  n_layers: 12
+  n_heads: 6
+  max_faces: 2048
+  vocab_size: 256
+  use_pos_embed: false
+  use_spherical_embed: true
+  relative: true
+  use_edge_cond: true
+
+data:
+  num_points: 2048
+  num_workers: 4
+  augment: true
+
+training:
+  batch_size: 128
+  lr: 6.0e-4
+  weight_decay: 0.1
+  max_steps: 50000
+  grad_clip: 1.0
+  warmup_steps: 1000
+  save_every: 10000
+  val_every_n_steps: 500
+  viz_every_n_steps: 2000
+  mixed_precision: true
+  masking:
+    - type: causal
+      prob: 1.0
+    - type: adjacent
+      prob: 1.0
+      prob_mask_adjacent: 0.5
+    - type: bidirectional
+      exclusive_prob: 0.3
+      context_fraction_min: 0.3
+      context_fraction_max: 0.85
+  target_builder:
+    type: adjacent
+  ordering:
+    strategies:
+      - type: random
+        prob: 0.25
+      - type: causal_axis
+        prob: 0.25
+      - type: bfs
+        prob: 0.25
+      - type: dfs
+        prob: 0.25
+    post_processing:
+      - type: shuffle
+        prob: 0.5
+        max_fraction: 1.0
+  pc_cond_prob: 0.5
+
+wandb:
+  enabled: true
+  project: mesh_genai
+  name: null
+  tags: []

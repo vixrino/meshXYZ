@@ -1,0 +1,12 @@
+torch>=2.0
+torch-cluster
+trimesh
+einops
+numpy
+PyYAML
+lightning
+jaxtyping
+beartype
+dacite
+pillow
+wandb
