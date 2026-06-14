@@ -289,6 +289,38 @@ def _sample_surface(verts: np.ndarray, faces: np.ndarray, num_points: int) -> np
     v2 = verts[faces[:, 2]]
     areas = 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
     probs = areas / (areas.sum() + 1e-8)
+    # Defensive normalization: ensure probs sum to exactly 1 (avoids floating point drift)
+    probs = np.asarray(probs, dtype=np.float64)
+    probs_sum = probs.sum()
+    if probs_sum <= 0 or not np.isfinite(probs_sum):
+        # All-zero areas (degenerate mesh) — fall back to uniform sampling
+        probs = np.ones(len(faces), dtype=np.float64) / len(faces)
+    else:
+        probs = probs / probs_sum  # exact renormalization
+    # Defensive normalization: ensure probs sum to exactly 1 (avoids floating point drift)
+    probs = np.asarray(probs, dtype=np.float64)
+    probs_sum = probs.sum()
+    if probs_sum <= 0 or not np.isfinite(probs_sum):
+        # All-zero areas (degenerate mesh) — fall back to uniform sampling
+        probs = np.ones(len(faces), dtype=np.float64) / len(faces)
+    else:
+        probs = probs / probs_sum  # exact renormalization
+    # Defensive normalization: ensure probs sum to exactly 1 (avoids floating point drift)
+    probs = np.asarray(probs, dtype=np.float64)
+    probs_sum = probs.sum()
+    if probs_sum <= 0 or not np.isfinite(probs_sum):
+        # All-zero areas (degenerate mesh) — fall back to uniform sampling
+        probs = np.ones(len(faces), dtype=np.float64) / len(faces)
+    else:
+        probs = probs / probs_sum  # exact renormalization
+    # Defensive normalization: ensure probs sum to exactly 1 (avoids floating point drift)
+    probs = np.asarray(probs, dtype=np.float64)
+    probs_sum = probs.sum()
+    if probs_sum <= 0 or not np.isfinite(probs_sum):
+        # All-zero areas (degenerate mesh) — fall back to uniform sampling
+        probs = np.ones(len(faces), dtype=np.float64) / len(faces)
+    else:
+        probs = probs / probs_sum  # exact renormalization
     chosen = np.random.choice(len(faces), size=num_points, p=probs)
     r1 = np.random.rand(num_points, 1)
     r2 = np.random.rand(num_points, 1)

@@ -3,6 +3,7 @@ import random
 import torch
 from torch import Tensor
 
+from ....constants import TRI_PAD
 from .base import BaseOrdering
 
 _AXIS_ORDERINGS: list[tuple[int, int, int]] = [
@@ -25,7 +26,12 @@ class CausalAxisOrdering(BaseOrdering):
         B, N, _ = faces.shape
         device = faces.device
 
-        centroids = faces.double().reshape(B, N, 3, 3).mean(dim=2)  # (B, N, 3)
+        # Unified 12-token layout: 4 vertices x 3 coords. Triangles have TRI_PAD
+        # in their first 3 tokens (1 padding vertex); quads use all 4 vertices.
+        verts = faces.double().reshape(B, N, 4, 3)            # (B, N, 4, 3)
+        is_pad = (faces.reshape(B, N, 4, 3) == TRI_PAD).all(dim=-1)  # (B, N, 4)
+        valid = (~is_pad).double().unsqueeze(-1)              # (B, N, 4, 1)
+        centroids = (verts * valid).sum(dim=2) / valid.sum(dim=2).clamp(min=1)  # (B, N, 3)
         scale = 256.0
         keys = torch.zeros(B, N, device=device)
 

@@ -46,10 +46,10 @@ def _apply_perm(faces: Tensor, face_neighbors: Tensor, perm: Tensor) -> tuple[Te
 
     Returns reordered (faces, face_neighbors).
     """
-    B, N, _ = faces.shape
+    B, N, T = faces.shape
     device = faces.device
 
-    new_faces = faces.gather(1, perm.unsqueeze(-1).expand(B, N, 9))
+    new_faces = faces.gather(1, perm.unsqueeze(-1).expand(B, N, T))
 
     # Reorder neighbor rows to match new face positions
     new_neighbors = face_neighbors.gather(1, perm.unsqueeze(-1).expand(B, N, 3))

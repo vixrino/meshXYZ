@@ -16,7 +16,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from torch_cluster import fps
+try:
+    from torch_cluster import fps
+except ImportError:
+    from .fps_fallback import fps
 
 
 ENCODER_ARCH = dict(
