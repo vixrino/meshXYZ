@@ -40,19 +40,20 @@ def _build_ordering(entry: dict) -> BaseOrdering:
 def _apply_perm(faces: Tensor, face_neighbors: Tensor, perm: Tensor) -> tuple[Tensor, Tensor]:
     """Apply a batch permutation to faces and remap face_neighbors accordingly.
 
-    faces:          (B, N, 9)
-    face_neighbors: (B, N, 3)  — indices into original sequence, -1 = no neighbor
+    faces:          (B, N, T)  — T = 9 (tri-only) or 12 (unified quad/tri)
+    face_neighbors: (B, N, S)  — S = 3 (tri-only) or 4 (quad/mixed); -1 = no neighbor
     perm:           (B, N)     — new[i] = old[perm[i]]
 
     Returns reordered (faces, face_neighbors).
     """
-    B, N, T = faces.shape
+    B, N, T = faces.shape        # T: token count per face
+    S = face_neighbors.shape[-1] # S: neighbor slots per face (3 or 4)
     device = faces.device
 
     new_faces = faces.gather(1, perm.unsqueeze(-1).expand(B, N, T))
 
     # Reorder neighbor rows to match new face positions
-    new_neighbors = face_neighbors.gather(1, perm.unsqueeze(-1).expand(B, N, 3))
+    new_neighbors = face_neighbors.gather(1, perm.unsqueeze(-1).expand(B, N, S))
 
     # Build inverse permutation
     inv_perm = torch.empty_like(perm)
@@ -61,7 +62,7 @@ def _apply_perm(faces: Tensor, face_neighbors: Tensor, perm: Tensor) -> tuple[Te
     # Remap neighbor indices: old position k → new position inv_perm[b, k]
     valid = new_neighbors >= 0
     safe = new_neighbors.clamp(min=0)
-    remapped = inv_perm.gather(1, safe.reshape(B, -1)).reshape(B, N, 3)
+    remapped = inv_perm.gather(1, safe.reshape(B, -1)).reshape(B, N, S)
     new_neighbors = torch.where(valid, remapped, torch.full_like(remapped, -1))
 
     return new_faces, new_neighbors

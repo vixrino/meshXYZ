@@ -11,8 +11,9 @@ class BaseOrdering(ABC):
     def permute(self, faces: Tensor, face_neighbors: Tensor, lengths: Tensor) -> Tensor:
         """Compute permutation indices for face reordering.
 
-        faces:          (B, N, 9)
-        face_neighbors: (B, N, 3)  adjacency indices, -1 = no neighbor
+        faces:          (B, N, T)  T=9  (triangle-only) or T=12 (unified quad/tri)
+        face_neighbors: (B, N, S)  S=3  (triangle-only) or S=4  (quad/mixed);
+                                   -1 = no neighbor
         lengths:        (B,) number of valid (non-padding) faces per sample
 
         Returns perm (B, N) where:

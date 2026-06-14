@@ -23,15 +23,21 @@ class CausalAxisOrdering(BaseOrdering):
     """
 
     def permute(self, faces: Tensor, face_neighbors: Tensor, lengths: Tensor) -> Tensor:
-        B, N, _ = faces.shape
+        B, N, T = faces.shape
         device = faces.device
 
-        # Unified 12-token layout: 4 vertices x 3 coords. Triangles have TRI_PAD
-        # in their first 3 tokens (1 padding vertex); quads use all 4 vertices.
-        verts = faces.double().reshape(B, N, 4, 3)            # (B, N, 4, 3)
-        is_pad = (faces.reshape(B, N, 4, 3) == TRI_PAD).all(dim=-1)  # (B, N, 4)
-        valid = (~is_pad).double().unsqueeze(-1)              # (B, N, 4, 1)
-        centroids = (verts * valid).sum(dim=2) / valid.sum(dim=2).clamp(min=1)  # (B, N, 3)
+        if T == 9:
+            # Triangle-only (9 tokens = 3 verts × 3 coords): straightforward mean.
+            centroids = faces.double().reshape(B, N, 3, 3).mean(dim=2)  # (B, N, 3)
+        else:
+            # Unified 12-token layout: 4 vertex slots per face, but triangle faces
+            # carry TRI_PAD (129) at positions 0-2, marking those as non-real vertices.
+            # Average only over the valid (non-padded) vertices.
+            verts  = faces.double().reshape(B, N, 4, 3)                  # (B, N, 4, 3)
+            is_pad = (faces.reshape(B, N, 4, 3) == TRI_PAD).all(dim=-1)  # (B, N, 4) bool
+            valid  = (~is_pad).double().unsqueeze(-1)                     # (B, N, 4, 1)
+            centroids = (verts * valid).sum(dim=2) / valid.sum(dim=2).clamp(min=1)  # (B,N,3)
+
         scale = 256.0
         keys = torch.zeros(B, N, device=device)
 

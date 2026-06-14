@@ -21,7 +21,7 @@ class BFSOrdering(BaseOrdering):
 
         for b in range(B):
             L = int(lengths[b].item())
-            adj = face_neighbors[b, :L].tolist()   # list of 3-lists
+            adj = face_neighbors[b, :L].tolist()   # list of 3-lists (tri) or 4-lists (quad)
 
             visited = [False] * L
             order = []
