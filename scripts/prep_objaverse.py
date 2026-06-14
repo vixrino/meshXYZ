@@ -116,10 +116,18 @@ def quadrangulate_mesh(src_path: str, dst_path: str) -> dict | None:
             log.warning("Empty mesh at %s; skipping quadrangulation.", src_path)
             return None
 
+        # Cleanup pass: GLB meshes from Objaverse often have duplicate verts,
+        # unreferenced verts, and non-manifold edges that break quadrangulation.
+        ms.meshing_remove_duplicate_vertices()
+        ms.meshing_remove_unreferenced_vertices()
+        ms.meshing_repair_non_manifold_edges()
+
         # Pair adjacent triangles into quads (preserves mesh resolution).
         ms.meshing_tri_to_quad_by_smart_triangle_pairing()
 
-        ms.save_current_mesh(dst_path)
+        # save_textures=False: GLB files embed textures that pymeshlab cannot
+        # re-export (missing plugin), causing ~60% of saves to fail otherwise.
+        ms.save_current_mesh(dst_path, save_textures=False)
 
     except Exception as exc:
         log.warning("Quadrangulation failed on %s: %s", Path(src_path).name, exc)
