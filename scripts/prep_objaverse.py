@@ -87,21 +87,19 @@ def analyse_mesh(path: str) -> dict:
     return {"n_tri": n_tri, "n_quad": n_quad, "n_total": n_total, "quad_frac": quad_frac}
 
 
-def quadrangulate_mesh(src_path: str, dst_path: str, target_faces: int) -> dict | None:
-    """Convert a triangle mesh to quad-dominant using pymeshlab cross-field quadrangulation.
+def quadrangulate_mesh(src_path: str, dst_path: str) -> dict | None:
+    """Convert a triangle mesh to quad-dominant using pymeshlab smart triangle pairing.
 
+    Pairs adjacent triangles into quads without changing mesh resolution.
     Saves the result as a .obj file at dst_path.  Returns updated topology stats
     on success, None on failure (caller should fall back to the original triangle mesh).
 
     Parameters
     ----------
     src_path : str
-        Input mesh path (any format trimesh can load).
+        Input mesh path (any format pymeshlab can load).
     dst_path : str
         Output .obj path (will be overwritten).
-    target_faces : int
-        Approximate target quad face count passed to the quadrangulation filter.
-        Rule of thumb: n_tri // 2, since one quad ≈ two triangles in area.
     """
     try:
         import pymeshlab  # noqa: PLC0415
@@ -118,11 +116,8 @@ def quadrangulate_mesh(src_path: str, dst_path: str, target_faces: int) -> dict 
             log.warning("Empty mesh at %s; skipping quadrangulation.", src_path)
             return None
 
-        # Step 1: cross-field creation (required before quadrangulation).
-        ms.meshing_cross_field_creation()
-
-        # Step 2: global greedy quadrangulation targeting ~n_tri/2 quads.
-        ms.meshing_quadrangulation_global_greedy(targetcount=max(4, target_faces))
+        # Pair adjacent triangles into quads (preserves mesh resolution).
+        ms.meshing_tri_to_quad_by_smart_triangle_pairing()
 
         ms.save_current_mesh(dst_path)
 
@@ -224,8 +219,7 @@ def download_and_filter(
             if quadrangulate:
                 # Always save output as .obj (the only format that preserves quads).
                 dst = out_path / f"{uid}.obj"
-                target_faces = max(4, stats["n_tri"] // 2)
-                new_stats = quadrangulate_mesh(src_path, str(dst), target_faces)
+                new_stats = quadrangulate_mesh(src_path, str(dst))
                 if new_stats:
                     stats = new_stats
                     was_quadrangulated = True
