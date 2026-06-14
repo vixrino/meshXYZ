@@ -42,7 +42,8 @@ class MeshTransformerModule(LightningModule):
         pc         = self._maybe_pc(batch)
         logits     = self.model(pc, batch["faces"], token_mask=token_mask, query_edges=query_edges)
 
-        loss    = reconstruction_loss(logits, targets, faces=batch["faces"])
+        loss    = reconstruction_loss(logits, targets, faces=batch["faces"],
+                                      eos_weight=self.training_cfg.eos_weight)
         metrics = compute_metrics(logits, targets, faces=batch["faces"])
         self.log("train/loss", loss, prog_bar=False, on_step=True, on_epoch=False)
         self.log_dict({f"train/{k}": v for k, v in metrics.items()}, prog_bar=False, on_step=True, on_epoch=False)
@@ -80,12 +81,19 @@ class MeshTransformerModule(LightningModule):
         ctx = batch["faces"][:1, :self.training_cfg.gen_max_ctx]
         pc_gen = batch["pc"][:1] if random.random() < self.training_cfg.pc_cond_prob else None
         with torch.no_grad():
-            _, intermediates, eos_snapshots, _, boundary_snapshots, query_snapshots = self.model.generate(
+            gen_results, intermediates, eos_snapshots, _, boundary_snapshots, query_snapshots = self.model.generate(
                 ctx,
                 pc=pc_gen,
                 max_steps=self.training_cfg.gen_max_steps,
                 return_intermediates=True,
             )
+
+        # Truncation watchdog: if upweighting EOS makes the model emit EOS too early,
+        # the generated mesh collapses to a handful of faces.  Log the final face count
+        # so the eos_weight side-effect is visible in Wandb alongside eos_acc.
+        if gen_results:
+            self.log("train/gen_final_faces", float(gen_results[0].shape[0]),
+                     prog_bar=False, on_step=True, on_epoch=False)
         gen_out_dir = None if wandb_run else os.path.join(self.trainer.log_dir, "gen_videos")
         save_generation_video(
             intermediates[0], gen_out_dir, wandb_run=wandb_run,

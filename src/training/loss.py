@@ -24,11 +24,20 @@ def reconstruction_loss(
     targets: Int[Tensor, "batch faces n_coords"],
     faces: Int[Tensor, "batch faces 9"] | None = None,
     pad_value: int = -1,
+    eos_weight: float = 1.0,
 ) -> Float[Tensor, ""]:
     """Cross-entropy loss over coordinate predictions.
 
     targets == pad_value (-1) → face is fully excluded from the loss.
     targets == EOS_RESIDUAL (255) → face is trained to predict EOS.
+
+    eos_weight : float
+        Per-class weight applied to the EOS_RESIDUAL token in the cross-entropy.
+        EOS targets are extremely rare (~1 face per mesh → <1% of tokens), so in a
+        shared softmax the optimizer trades EOS away to sharpen coord predictions
+        and loss_eos drifts upward.  eos_weight > 1.0 upweights the EOS class to
+        counteract this.  Default 1.0 reproduces the unweighted loss exactly
+        (the weight tensor is all-ones), so triangle runs are bit-identical.
     """
     if faces is not None:
         targets = targets.clone()
@@ -36,8 +45,17 @@ def reconstruction_loss(
     vocab_size   = logits.shape[-1]
     logits_flat  = logits.reshape(-1, vocab_size)
     targets_flat = targets.reshape(-1)
+
+    # Only build a weight tensor when needed; eos_weight=1.0 keeps the exact
+    # same code path (weight=None) as before for backward compatibility.
+    weight = None
+    if eos_weight != 1.0:
+        weight = torch.ones(vocab_size, device=logits.device, dtype=logits.dtype)
+        weight[EOS_RESIDUAL] = eos_weight
+
     # ignore_index handles empty valid sets inside the CUDA kernel — no CPU-GPU sync.
-    loss    = F.cross_entropy(logits_flat, targets_flat, ignore_index=pad_value, reduction="sum")
+    loss    = F.cross_entropy(logits_flat, targets_flat, weight=weight,
+                              ignore_index=pad_value, reduction="sum")
     n_valid = (targets_flat != pad_value).sum().clamp(min=1)
     return loss / n_valid
 
