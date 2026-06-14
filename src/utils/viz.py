@@ -14,6 +14,8 @@ ZOOM_FRACTION = 0.25  # fraction of the global mesh extent shown around the quer
 EOS_RESIDUAL = 255    # matches constants.EOS_RESIDUAL
 COLOR_THRESHOLD = 16.0  # error (in quant steps) at which prediction colour saturates to blue
 
+_TRI_PAD = 129  # matches constants.TRI_PAD — sentinel in unified 12-token block
+
 
 def _rotation_matrix(azimuth_deg: float = 45.0, elevation_deg: float = 30.0) -> np.ndarray:
     az, el = np.radians(azimuth_deg), np.radians(elevation_deg)
@@ -28,6 +30,31 @@ def _rotation_matrix(azimuth_deg: float = 45.0, elevation_deg: float = 30.0) -> 
 
 _R = _rotation_matrix()
 
+
+def _face_tokens_to_verts(face_tokens: np.ndarray) -> np.ndarray:
+    """Decode a face token array into (V, 3) float32 vertex coordinates.
+
+    Handles three layouts:
+      - 9-token triangle  (legacy / tri mode): reshape directly to (3, 3).
+      - 12-token triangle (quad mode, TRI_PAD at pos 0): real coords at positions 3-11 → (3, 3).
+      - 12-token quad     (quad mode, coord token at pos 0): all positions → (4, 3).
+    """
+    n = face_tokens.shape[0]
+    if n == 9:
+        return face_tokens.reshape(3, 3).astype(np.float32)
+    # 12-token unified block
+    if int(face_tokens[0]) == _TRI_PAD:
+        return face_tokens[3:].reshape(3, 3).astype(np.float32)
+    return face_tokens.reshape(4, 3).astype(np.float32)
+
+
+def _all_real_verts(faces_np: np.ndarray) -> np.ndarray:
+    """Return (M, 3) float32 array of all real vertex positions from a (N, 9|12) face array.
+
+    Strips TRI_PAD sentinel rows so the bounding sphere / scale is computed on geometry only.
+    """
+    parts = [_face_tokens_to_verts(f) for f in faces_np]
+    return np.vstack(parts).astype(np.float32) if parts else np.zeros((1, 3), np.float32)
 
 
 def _screen_bounds(
@@ -55,6 +82,11 @@ def _to_pixels(
     sx_min: float, sy_min: float, scale: float,
     R: "np.ndarray | None" = None,
 ) -> tuple[list[tuple[int, int]], float]:
+    """Project face vertices to screen pixels.
+
+    face is (V, 3) float32 — V may be 3 (triangle) or 4 (quad).
+    Returns (pts, depth) where pts is a list of V (x, y) integer pixel tuples.
+    """
     if R is None:
         R = _R
     rot   = face @ R.T
@@ -63,7 +95,7 @@ def _to_pixels(
     pts = [
         (int((rot[i, 0] - sx_min) / scale * draw_w + PAD),
          int((1.0 - (rot[i, 1] - sy_min) / scale) * draw_w + PAD))
-        for i in range(3)
+        for i in range(len(face))   # handles both 3-vertex tri and 4-vertex quad
     ]
     return pts, depth
 
@@ -81,32 +113,34 @@ def _render_one(
     real_pos = valid_pos[(tgts[valid_pos] < 128).any(axis=1)]
     if len(real_pos) == 0:
         return None
-    _, _, global_scale = _screen_bounds(tgts[real_pos].reshape(-1, 3).astype(np.float32))
+    _, _, global_scale = _screen_bounds(_all_real_verts(tgts[real_pos]))
 
-    q_rot  = tgts[t].reshape(3, 3).astype(np.float32) @ _R.T
-    q_cx   = float(q_rot[:, 0].mean())
-    q_cy   = float(q_rot[:, 1].mean())
-    scale  = ZOOM_FRACTION * global_scale
-    sx_min = q_cx - scale / 2
-    sy_min = q_cy - scale / 2
+    q_verts = _face_tokens_to_verts(tgts[t])
+    q_rot   = q_verts @ _R.T
+    q_cx    = float(q_rot[:, 0].mean())
+    q_cy    = float(q_rot[:, 1].mean())
+    scale   = ZOOM_FRACTION * global_scale
+    sx_min  = q_cx - scale / 2
+    sy_min  = q_cy - scale / 2
 
     img  = Image.new("RGBA", (IMG_SIZE, IMG_SIZE), (255, 255, 255, 255))
     draw = ImageDraw.Draw(img)
 
     ctx: list[tuple[float, list]] = []
     for pos in valid_pos[(valid_pos != t) & ~token_mask_t[valid_pos]]:
-        pts, depth = _to_pixels(tgts[pos].reshape(3, 3).astype(np.float32), sx_min, sy_min, scale)
+        pts, depth = _to_pixels(_face_tokens_to_verts(tgts[pos]), sx_min, sy_min, scale)
         ctx.append((depth, pts))
     ctx.sort(key=lambda x: x[0])
 
     for _, pts in ctx:
-        draw.line([pts[0], pts[1], pts[2], pts[0]], fill=(130, 130, 130, 180), width=1)
+        # close the polygon by appending the first point (works for both tri and quad)
+        draw.line(pts + [pts[0]], fill=(130, 130, 130, 180), width=1)
 
-    gt_pts, _ = _to_pixels(tgts[t].reshape(3, 3).astype(np.float32), sx_min, sy_min, scale)
+    gt_pts, _ = _to_pixels(_face_tokens_to_verts(tgts[t]), sx_min, sy_min, scale)
     draw.polygon(gt_pts, fill=(44, 160, 44, 230), outline=(26, 122, 26, 255))
 
-    pred_face = preds[t].reshape(3, 3).astype(np.float32)
-    gt_face   = gt_targets[t].reshape(3, 3).astype(np.float32)
+    pred_face = _face_tokens_to_verts(preds[t])
+    gt_face   = _face_tokens_to_verts(gt_targets[t])
 
     gt_tgt_pts, _ = _to_pixels(gt_face, sx_min, sy_min, scale)
     draw.polygon(gt_tgt_pts, fill=None, outline=(200, 180, 0, 220))
@@ -158,12 +192,13 @@ def _render_gen_frame(
     if N == 0:
         return img
 
-    faces_3d = faces_np.reshape(N, 3, 3).astype(np.float32)
+    # Decode each face individually — handles 9-token tri, 12-token tri (TRI_PAD), and 12-token quad.
     items = []
-    for idx, face in enumerate(faces_3d):
-        rot = face @ R.T
+    for idx in range(N):
+        verts = _face_tokens_to_verts(faces_np[idx])
+        rot   = verts @ R.T
         depth = float(rot[:, 2].mean())
-        pts, _ = _to_pixels(face, sx_min, sy_min, scale, R=R)
+        pts, _ = _to_pixels(verts, sx_min, sy_min, scale, R=R)
         items.append((depth, pts, idx, highlight_newest and idx == N - 1))
 
     items.sort(key=lambda x: x[0])
@@ -218,7 +253,8 @@ def _render_generation_video(
     import imageio
     import wandb
 
-    final_verts = intermediates[-1].reshape(-1, 3).astype(np.float32)
+    # Use _all_real_verts so TRI_PAD sentinel rows (value 129) don't skew the bounding sphere.
+    final_verts = _all_real_verts(intermediates[-1])
     centroid, scale = _bounding_sphere_scale(final_verts)
 
     n = len(intermediates)
@@ -286,7 +322,10 @@ def _reconstruct_faces(
     raw_gt: np.ndarray,       # (N, 9) targets; positions 0-5 are PAD=-1, 6-8 are new vertex or EOS
     query_edges: np.ndarray,  # (N, 6) ev0, ev1
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Reconstruct full canonical (N, 9) faces for viz from edge + predicted/gt vertex."""
+    """Reconstruct full canonical (N, 9) faces for viz from edge + predicted/gt vertex.
+
+    Only used in use_edge_cond=True mode (triangle-only); quad mode is always edge_cond=False.
+    """
     N = query_edges.shape[0]
     pred_faces = np.zeros((N, 9), dtype=raw_preds.dtype)
     gt_faces   = raw_gt.copy()  # keep EOS/PAD structure for EOS detection; overwrite non-EOS below
@@ -319,7 +358,7 @@ def _render_all(
         os.makedirs(out_dir, exist_ok=True)
 
     # Use .any() so EOS detection works for both modes:
-    #   - use_edge_cond=False: all 9 coords are EOS_RESIDUAL → any() = True ✓
+    #   - use_edge_cond=False: all 9/12 coords are EOS_RESIDUAL → any() = True ✓
     #   - use_edge_cond=True:  positions 6-8 are EOS_RESIDUAL (after reconstruction) → any() = True ✓
     masked_pos = valid_pos[~(gt_targets[valid_pos] == EOS_RESIDUAL).any(axis=1)]
     if len(masked_pos) == 0:
@@ -366,16 +405,17 @@ def save_prediction_grid(
     n_viz: int = N_VIZ,
     query_edges: "torch.Tensor | None" = None,
 ) -> None:
-    raw_preds = logits[0].argmax(dim=-1).cpu().numpy()   # (N, 9)
+    raw_preds = logits[0].argmax(dim=-1).cpu().numpy()   # (N, 9) or (N, 12)
     tgts      = faces[0].cpu().numpy()
-    raw_gt    = gt_targets[0].cpu().numpy()               # (N, 9)
+    raw_gt    = gt_targets[0].cpu().numpy()               # (N, 9) or (N, 12)
     valid_pos = np.where(valid_mask[0].cpu().numpy())[0]
     tmask     = token_mask[0].cpu().numpy()
     if len(valid_pos) == 0:
         return
 
     if query_edges is not None:
-        # edge_cond mode: positions 0-5 of preds/gt are dummy — reconstruct full canonical faces.
+        # edge_cond mode (triangle-only): positions 0-5 of preds/gt are dummy —
+        # reconstruct full canonical (N, 9) faces.
         qe = query_edges[0].cpu().numpy()   # (N, 6)
         preds, gt_tgts = _reconstruct_faces(raw_preds, raw_gt, qe)
     else:
