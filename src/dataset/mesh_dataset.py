@@ -1,7 +1,6 @@
 import glob
 import os
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import torch
@@ -21,12 +20,15 @@ class DataCfg:
     num_points: int = 2048
     num_workers: int = 4
     augment: bool = False
-    face_layout: Literal["tri", "quad"] = "tri"
+    face_layout: str = "tri"
     # "tri": triangle-only mode — existing (F, 9) faces, (F, 3) neighbors. Default; fully
     #        backward-compatible with all existing triangle configs and checkpoints.
     # "quad": QuadGPT unified 12-token block — (F, 12) faces, (F, 4) neighbors.
     #         Triangles are padded with TRI_PAD at positions 0-2; quads use all 12 positions.
     #         Requires vocab_size=257, use_edge_cond=false, relative=false in decoder config.
+    # Note: str not Literal["tri","quad"] — dacite silently drops Literal-typed fields
+    # when the installed dacite version predates full Literal support, causing face_layout
+    # to remain "tri" even when config says "quad".
 
 
 def load_mesh_raw(
