@@ -4,11 +4,12 @@ Relative mode predicts coordinate residuals against an anchor v0 and then remaps
 them to absolute-coordinate logits in MLP._rel_to_abs_logits.  Two things must
 hold for the 12-token layout:
 
-  1. The anchor is the *real* first vertex: positions 0-2 for a quad, positions
-     3-5 for a TRI_PAD-prefixed triangle (Decoder._relative_anchor).
+  1. The anchor is the *real* first vertex: positions 0-2 for both quad and
+     triangle (TRI_PAD moved to the end), so Decoder._relative_anchor needs no
+     face-type branch.
   2. TRI_PAD=129 sits in the remapping dead-zone [128, 254] that is forced to
-     -inf, so the triangle prefix positions (0-2) must keep their raw absolute
-     logits — otherwise the model could never predict TRI_PAD.
+     -inf, so the triangle's trailing pad positions (9-11) must keep their raw
+     absolute logits — otherwise the model could never predict TRI_PAD.
 
 Backward compatibility: 9-token triangle-only mode (is_tri=None) is unchanged.
 """
@@ -45,12 +46,12 @@ def test_anchor_quad_uses_positions_0_2():
     assert anchor[0, 0].tolist() == [5, 6, 7]
 
 
-def test_anchor_triangle_skips_tri_pad_prefix():
+def test_anchor_triangle_uses_positions_0_2():
     dec = Decoder(_quad_cfg())
-    # triangle row: positions 0-2 = TRI_PAD, real v0 at positions 3-5
-    tri = torch.tensor([[[TRI_PAD, TRI_PAD, TRI_PAD, 20, 21, 22, 30, 31, 32, 40, 41, 42]]])
+    # triangle row: real v0 at positions 0-2, TRI_PAD trailing at positions 9-11
+    tri = torch.tensor([[[20, 21, 22, 30, 31, 32, 40, 41, 42, TRI_PAD, TRI_PAD, TRI_PAD]]])
     anchor = dec._relative_anchor(tri)
-    assert anchor[0, 0].tolist() == [20, 21, 22]   # not [129,129,129]
+    assert anchor[0, 0].tolist() == [20, 21, 22]   # real v0, never the pad
 
 
 def test_anchor_9token_unchanged():
@@ -62,9 +63,9 @@ def test_anchor_9token_unchanged():
 
 # ─────────────────────── _rel_to_abs_logits position-aware ────────────────────
 
-def test_tri_prefix_keeps_raw_logits_so_tri_pad_is_predictable():
-    """For a triangle row, prefix positions 0-2 must keep raw logits (TRI_PAD
-    finite); coordinate positions 3-11 are remapped (TRI_PAD dead-zoned)."""
+def test_tri_suffix_keeps_raw_logits_so_tri_pad_is_predictable():
+    """For a triangle row, trailing pad positions 9-11 must keep raw logits (TRI_PAD
+    finite); coordinate positions 0-8 are remapped (TRI_PAD dead-zoned)."""
     mlp = MLP(d_hidden=32, vocab_size=VOCAB, use_edge_cond=False,
               relative=True, n_face_tokens=12)
     rel = torch.randn(2, 12, VOCAB)
@@ -73,11 +74,11 @@ def test_tri_prefix_keeps_raw_logits_so_tri_pad_is_predictable():
 
     out = mlp._rel_to_abs_logits(rel, anchor, is_tri=is_tri)
 
-    # Triangle row 0: prefix positions are the raw logits verbatim.
-    assert torch.equal(out[0, 0:3, :], rel[0, 0:3, :])
-    assert torch.isfinite(out[0, 0:3, TRI_PAD]).all()          # TRI_PAD predictable
-    # Triangle row 0: coordinate positions 3-11 are remapped → TRI_PAD dead-zoned.
-    assert torch.isinf(out[0, 3:12, TRI_PAD]).all()
+    # Triangle row 0: trailing pad positions are the raw logits verbatim.
+    assert torch.equal(out[0, 9:12, :], rel[0, 9:12, :])
+    assert torch.isfinite(out[0, 9:12, TRI_PAD]).all()         # TRI_PAD predictable
+    # Triangle row 0: coordinate positions 0-8 are remapped → TRI_PAD dead-zoned.
+    assert torch.isinf(out[0, 0:9, TRI_PAD]).all()
 
 
 def test_quad_row_has_no_tri_pad_passthrough():
@@ -130,11 +131,11 @@ def test_forward_quad_relative_shapes_and_finiteness():
     C = torch.randn(B, 4, 8)
     # row 0 triangle, rows 1-2 quad
     faces = torch.randint(0, QUANT_MAX + 1, (B, N, 12))
-    faces[:, 0, 0:3] = TRI_PAD
+    faces[:, 0, 9:12] = TRI_PAD
     logits = dec(C, faces)
     assert logits.shape == (B, N, 12, VOCAB)
-    # Triangle prefix (pos 0-2) must allow TRI_PAD; quad rows must not.
-    assert torch.isfinite(logits[:, 0, 0:3, TRI_PAD]).all()
+    # Triangle trailing pad (pos 9-11) must allow TRI_PAD; quad rows must not.
+    assert torch.isfinite(logits[:, 0, 9:12, TRI_PAD]).all()
     assert torch.isinf(logits[:, 1:, :, TRI_PAD]).all()
 
 

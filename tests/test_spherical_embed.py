@@ -2,10 +2,10 @@
 
 Covers:
   (a) a 12-coord quad,
-  (b) a 12-coord triangle with a TRI_PAD prefix,
+  (b) a 12-coord triangle with a trailing TRI_PAD pad (positions 9-11),
   (c) a pure 9-coord triangle (backward compatibility),
 plus the consistency guarantee that the triangle's spherical content is identical
-in the 9-coord and 12-coord (TRI_PAD-prefixed) layouts, a mixed batch, and the
+in the 9-coord and 12-coord (trailing-pad) layouts, a mixed batch, and the
 error path for an unsupported channel count.
 """
 
@@ -42,17 +42,17 @@ def test_quad_12_shape_and_anchor():
     assert _is_unit_interval(out[3:12])
 
 
-def test_triangle_12_preserves_tri_pad_prefix():
+def test_triangle_12_preserves_tri_pad_suffix():
     pad = TRI_PAD
-    tri12 = _norm([pad, pad, pad,  10, 20, 30,  10, 20, 90,  10, 80, 90])
+    tri12 = _norm([10, 20, 30,  10, 20, 90,  10, 80, 90,  pad, pad, pad])
     out = face_cartesian_to_spherical(tri12)
 
     assert out.shape == (12,)
-    # TRI_PAD prefix passes through untouched (face-type signal survives).
-    assert torch.allclose(out[0:3], tri12[0:3])
-    # Prefix is still detectably out-of-range (normalized TRI_PAD = 129/128 > 1).
-    assert bool((out[0:3] > 1.0).all())
-    assert _is_unit_interval(out[6:12])
+    # TRI_PAD suffix passes through untouched (face-type signal survives).
+    assert torch.allclose(out[9:12], tri12[9:12])
+    # Suffix is still detectably out-of-range (normalized TRI_PAD = 129/128 > 1).
+    assert bool((out[9:12] > 1.0).all())
+    assert _is_unit_interval(out[3:9])
 
 
 def test_pure_9_coord_backward_compatible():
@@ -69,13 +69,13 @@ def test_tri12_matches_tri9_on_spherical_part():
     """The triangle's spherical content must be identical across both layouts."""
     coords = [10, 20, 30,  10, 20, 90,  10, 80, 90]
     tri9  = _norm(coords)
-    tri12 = _norm([TRI_PAD, TRI_PAD, TRI_PAD] + coords)
+    tri12 = _norm(coords + [TRI_PAD, TRI_PAD, TRI_PAD])
 
     out9  = face_cartesian_to_spherical(tri9)
     out12 = face_cartesian_to_spherical(tri12)
 
-    # Positions 3-11 of the 12-token output == positions 0-8 of the 9-token output.
-    assert torch.allclose(out12[3:12], out9, atol=1e-9)
+    # Positions 0-8 of the 12-token output == the 9-token output.
+    assert torch.allclose(out12[0:9], out9, atol=1e-9)
 
 
 def test_known_spherical_value_along_z_axis():
@@ -92,7 +92,7 @@ def test_known_spherical_value_along_z_axis():
 
 def test_mixed_batch_tri_and_quad():
     """A batch containing both a TRI_PAD triangle and a quad is handled per-row."""
-    tri12 = [TRI_PAD, TRI_PAD, TRI_PAD, 10, 20, 30, 10, 20, 90, 10, 80, 90]
+    tri12 = [10, 20, 30, 10, 20, 90, 10, 80, 90, TRI_PAD, TRI_PAD, TRI_PAD]
     quad  = [10, 20, 30, 10, 20, 90, 10, 80, 90, 10, 80, 30]
     batch = _norm([tri12, quad])              # (2, 12)
     out = face_cartesian_to_spherical(batch)
@@ -106,7 +106,7 @@ def test_mixed_batch_tri_and_quad():
 
 def test_explicit_mask_matches_threshold_on_real_data():
     """For real data, the explicit is_tri mask gives the same result as the fallback."""
-    tri12 = [TRI_PAD, TRI_PAD, TRI_PAD, 10, 20, 30, 10, 20, 90, 10, 80, 90]
+    tri12 = [10, 20, 30, 10, 20, 90, 10, 80, 90, TRI_PAD, TRI_PAD, TRI_PAD]
     quad  = [10, 20, 30, 10, 20, 90, 10, 80, 90, 10, 80, 30]
     batch = _norm([tri12, quad])                 # (2, 12)
 
@@ -127,14 +127,14 @@ def test_mask_takes_precedence_over_values():
     forced_tri  = face_cartesian_to_spherical(vec, is_tri=torch.tensor(True))
     forced_quad = face_cartesian_to_spherical(vec, is_tri=torch.tensor(False))
 
-    # Triangle interpretation preserves positions 0-2 as the raw prefix and applies
-    # the 9-coord transform to positions 3-11; quad interpretation uses pos 0-2 as v0.
-    assert torch.allclose(forced_tri[0:3], vec[0:3])      # prefix preserved
-    assert torch.allclose(forced_tri[3:6], vec[3:6])      # t_v0 anchor
+    # Triangle interpretation: v0 at 0-2, the 9-coord transform on positions 0-8,
+    # and the trailing pad at 9-11 passed through untouched; quad uses all 4 verts.
+    assert torch.allclose(forced_tri[0:3], vec[0:3])      # v0 anchor preserved
+    assert torch.allclose(forced_tri[9:12], vec[9:12])    # trailing tail untouched
     # The two interpretations must differ (mask actually changes the encoding).
     assert not torch.allclose(forced_tri, forced_quad)
-    # forced_tri spherical part equals the pure 9-coord result of tokens 3-11.
-    assert torch.allclose(forced_tri[3:12], face_cartesian_to_spherical(vec[3:12]))
+    # forced_tri's first 9 positions equal the pure 9-coord result of tokens 0-8.
+    assert torch.allclose(forced_tri[0:9], face_cartesian_to_spherical(vec[0:9]))
 
 
 def test_unsupported_channel_count_raises():

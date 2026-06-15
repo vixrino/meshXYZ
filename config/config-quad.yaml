@@ -12,10 +12,10 @@ decoder:
                             # and TRI_NEIGHBOR=256 (slot-2 triangle marker). Index 256 was the
                             # previously-unused slot, so no output-dim change vs the shared-token
                             # version — existing checkpoints stay loadable.
-  n_face_tokens: 12        # unified 12-token block (3 TRI_PAD + 9 coords for tri; 12 coords for quad)
+  n_face_tokens: 12        # unified 12-token block (9 coords + 3 TRI_PAD at the end for tri; 12 coords for quad)
   use_pos_embed: false
-  use_spherical_embed: true   # adapted for the 12-token unified block (quad + TRI_PAD-prefixed tri)
-  relative: true           # 12-token: anchor on the real v0 (TRI_PAD-aware) + raw logits at the TRI_PAD prefix
+  use_spherical_embed: true   # adapted for the 12-token unified block (quad + tri with trailing TRI_PAD)
+  relative: true           # 12-token: anchor always on v0 at 0-2 + raw logits at the trailing TRI_PAD pad
   use_edge_cond: true      # 12-token: 6 edge pad + 6 predicted (quad=2 verts; tri=1 vert + EOS marker)
 
 data:

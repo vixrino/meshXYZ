@@ -106,8 +106,9 @@ def _to_unified_12_tokens(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Combine triangle and quad face sequences into a unified (F, 12) block format.
 
-    Triangle faces are padded to 12 tokens by prepending 3 *tri_pad_token* values:
-        [TRI_PAD, TRI_PAD, TRI_PAD, v0_c0, v0_c1, v0_c2, v1_c0, …, v2_c2]
+    Triangle faces are padded to 12 tokens by appending 3 *tri_pad_token* values
+    at the END (so positions 0-2 are always the real first vertex, tri or quad):
+        [v0_c0, v0_c1, v0_c2, v1_c0, …, v2_c2, TRI_PAD, TRI_PAD, TRI_PAD]
 
     Quad faces are unchanged (already 12 tokens):
         [v0_c0, v0_c1, v0_c2, v1_c0, …, v3_c2]
@@ -127,7 +128,7 @@ def _to_unified_12_tokens(
 
     if T > 0:
         pad = np.full((T, 3), tri_pad_token, dtype=np.int64)
-        parts.append(np.concatenate([pad, face_seq_tri], axis=1))  # (T, 12)
+        parts.append(np.concatenate([face_seq_tri, pad], axis=1))  # (T, 12)
         is_q_parts.append(np.zeros(T, dtype=bool))
 
     if Q > 0:
@@ -184,9 +185,9 @@ def build_edge_adjacency(face_seq_q: np.ndarray) -> np.ndarray:
 def build_edge_adjacency_unified(face_seq_12: np.ndarray) -> np.ndarray:
     """Compute face adjacency for a mixed (F, 12) unified face sequence.
 
-    Detects face type from the first token:
-        face_seq_12[:, 0] == TRI_PAD (129) → triangle (coords at positions 3–11, 3 edges)
-        face_seq_12[:, 0] in [0, QUANT_MAX] → quad (coords at positions 0–11, 4 edges)
+    Detects face type from the trailing pad token (padding moved to the end):
+        face_seq_12[:, 9] == TRI_PAD (129) → triangle (coords at positions 0–8, 3 edges)
+        face_seq_12[:, 9] in [0, QUANT_MAX] → quad (coords at positions 0–11, 4 edges)
 
     Edges are identified by quantized vertex key pairs — same as build_edge_adjacency —
     so tri-quad shared edges are detected correctly even across face types.
@@ -212,14 +213,14 @@ def build_edge_adjacency_unified(face_seq_12: np.ndarray) -> np.ndarray:
     F = len(face_seq_12)
     B = int(QUANT_MAX) + 1  # 128
 
-    tri_mask = face_seq_12[:, 0] == TRI_PAD   # (F,) bool
+    tri_mask = face_seq_12[:, 9] == TRI_PAD   # (F,) bool — pad at the end
     tri_idx  = np.where( tri_mask)[0]
     quad_idx = np.where(~tri_mask)[0]
 
     # --- vertex key extraction -------------------------------------------------
 
     if len(tri_idx) > 0:
-        fs_t = face_seq_12[tri_idx, 3:].astype(np.int64)       # (F_T, 9)
+        fs_t = face_seq_12[tri_idx, :9].astype(np.int64)       # (F_T, 9)
         vk_t = (fs_t[:, 0::3] * B * B + fs_t[:, 1::3] * B + fs_t[:, 2::3])  # (F_T, 3)
     else:
         vk_t = np.empty((0, 3), dtype=np.int64)
@@ -384,17 +385,17 @@ def process_mesh(
     face_seq_12, _  = _to_unified_12_tokens(seq_tri, seq_quad, TRI_PAD)
 
     # Global ZYX sort: order all faces by their first real vertex's ZYX key.
-    # Triangle first real vertex is at tokens [3,4,5] = [x,y,z]; quad at [0,1,2].
+    # With TRI_PAD moved to the end, the first real vertex is at tokens [0,1,2]=[x,y,z]
+    # for both triangles and quads — no face-type branch needed.
     # ZYX key = z*B² + y*B + x, matching the intra-face canonicalization key.
     # This interleaves tri and quad faces spatially (instead of a rigid tri-then-quad
     # block), producing diverse quad→tri and tri→quad context transitions for the
     # autoregressive decoder to learn face-type distinction.
     if len(face_seq_12) > 1:
         _B     = int(QUANT_MAX) + 1
-        _is_t  = face_seq_12[:, 0] == TRI_PAD
-        _x     = np.where(_is_t, face_seq_12[:, 3], face_seq_12[:, 0])
-        _y     = np.where(_is_t, face_seq_12[:, 4], face_seq_12[:, 1])
-        _z     = np.where(_is_t, face_seq_12[:, 5], face_seq_12[:, 2])
+        _x     = face_seq_12[:, 0]
+        _y     = face_seq_12[:, 1]
+        _z     = face_seq_12[:, 2]
         _keys  = _z.astype(np.int64) * _B * _B + _y.astype(np.int64) * _B + _x.astype(np.int64)
         face_seq_12 = face_seq_12[np.argsort(_keys, kind="stable")]
 

@@ -156,20 +156,21 @@ class AdjacentTargetBuilder(BaseTargetBuilder):
     ) -> tuple[Int[Tensor, "BN 3"], Int[Tensor, "BN 3"], Int[Tensor, "batch faces 6"]]:
         """Extract and lex-sort the two vertices of the query face's open edge.
 
-        TRI_PAD-aware: a triangle's real vertices start at position 3 and form a
-        3-cycle (edges 0/1/2); a quad uses positions 0-11 and a 4-cycle (edges
-        0/1/2/3).  Lex-sorting matches the (min,max) convention used by generate().
+        TRI_PAD-aware: a triangle's real vertices start at position 0 and form a
+        3-cycle (edges 0/1/2), with TRI_PAD padding in the trailing slot (9-11);
+        a quad uses positions 0-11 and a 4-cycle (edges 0/1/2/3).  Lex-sorting
+        matches the (min,max) convention used by generate().
         """
         B, N = faces.shape[:2]
         BN = B * N
         ff   = faces.reshape(BN, 12)
         e    = open_edge.reshape(BN)
-        is_tri = ff[:, 0] == TRI_PAD                      # (BN,)
+        is_tri = ff[:, 9] == TRI_PAD                      # (BN,) — pad at the end
         nv     = torch.where(is_tri, torch.full_like(e, 3), torch.full_like(e, 4))
-        base   = torch.where(is_tri, torch.full_like(e, 3), torch.full_like(e, 0))
 
-        a_start = base + e * 3
-        b_start = base + ((e + 1) % nv) * 3
+        # Real vertices start at position 0 for both tri and quad (pad at the end).
+        a_start = e * 3
+        b_start = ((e + 1) % nv) * 3
         off     = torch.arange(3, device=faces.device)
         ev_a = ff.gather(1, (a_start.unsqueeze(-1) + off))   # (BN,3)
         ev_b = ff.gather(1, (b_start.unsqueeze(-1) + off))
@@ -196,8 +197,8 @@ class AdjacentTargetBuilder(BaseTargetBuilder):
         v2 is unused (the caller writes EOS_RESIDUAL into slot 2).
         """
         BN = tgt_coords.shape[0] * tgt_coords.shape[1]
-        nb = tgt_coords.reshape(BN, 4, 3)                       # pos 0 == TRI_PAD for triangles
-        nb_is_tri = tgt_coords.reshape(BN, 12)[:, 0] == TRI_PAD
+        nb = tgt_coords.reshape(BN, 4, 3)                       # trailing slot == TRI_PAD for triangles
+        nb_is_tri = tgt_coords.reshape(BN, 12)[:, 9] == TRI_PAD
         idx = torch.arange(BN, device=tgt_coords.device)
 
         is_ev0 = (nb == ev0.reshape(BN, 1, 3)).all(-1)         # (BN,4)

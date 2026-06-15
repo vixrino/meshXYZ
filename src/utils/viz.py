@@ -38,15 +38,15 @@ def _face_tokens_to_verts(face_tokens: np.ndarray) -> np.ndarray:
 
     Handles three layouts:
       - 9-token triangle  (legacy / tri mode): reshape directly to (3, 3).
-      - 12-token triangle (quad mode, TRI_PAD at pos 0): real coords at positions 3-11 → (3, 3).
-      - 12-token quad     (quad mode, coord token at pos 0): all positions → (4, 3).
+      - 12-token triangle (quad mode, TRI_PAD at pos 9-11): real coords at positions 0-8 → (3, 3).
+      - 12-token quad     (quad mode, coord token at pos 9): all positions → (4, 3).
     """
     n = face_tokens.shape[0]
     if n == 9:
         return face_tokens.reshape(3, 3).astype(np.float32)
-    # 12-token unified block
-    if int(face_tokens[0]) == _TRI_PAD:
-        return face_tokens[3:].reshape(3, 3).astype(np.float32)
+    # 12-token unified block (pad at the end)
+    if int(face_tokens[9]) == _TRI_PAD:
+        return face_tokens[:9].reshape(3, 3).astype(np.float32)
     return face_tokens.reshape(4, 3).astype(np.float32)
 
 
@@ -348,11 +348,11 @@ def _reconstruct_faces(
 def _canonical_face_12_np(face12: np.ndarray) -> np.ndarray:
     """Numpy mirror of geometry.canonical_face_12 (rotation only, no flip)."""
     face12 = np.asarray(face12)
-    if face12[0] > 127:                                   # triangle (TRI_PAD prefix)
-        coords  = np.clip(face12[3:], 0, 127).reshape(3, 3)
+    if face12[9] > 127:                                   # triangle (TRI_PAD pad at the end)
+        coords  = np.clip(face12[:9], 0, 127).reshape(3, 3)
         keys    = [(int(v[2]), int(v[1]), int(v[0])) for v in coords]
         rotated = np.roll(coords, -keys.index(min(keys)), axis=0).reshape(9)
-        return np.concatenate([np.full(3, _TRI_PAD), rotated])
+        return np.concatenate([rotated, np.full(3, _TRI_PAD)])
     coords = np.clip(face12, 0, 127).reshape(4, 3)
     keys   = [(int(v[2]), int(v[1]), int(v[0])) for v in coords]
     return np.roll(coords, -keys.index(min(keys)), axis=0).reshape(12)
@@ -376,7 +376,7 @@ def _reconstruct_faces_12(
             continue
         ev0, ev1 = query_edges[i, :3], query_edges[i, 3:]
         if (gt_v2 == _TRI_NEIGHBOR).any():                # triangle neighbor (slot-2 marker)
-            gt_faces[i] = _canonical_face_12_np(np.concatenate([np.full(3, _TRI_PAD), ev0, ev1, gt_v1]))
+            gt_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, gt_v1, np.full(3, _TRI_PAD)]))
         else:                                              # quad neighbor
             gt_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, gt_v1, gt_v2]))
 
@@ -384,7 +384,7 @@ def _reconstruct_faces_12(
         if (pv1 == EOS_RESIDUAL).any():                   # slot-1 STOP
             pred_faces[i, 6:9] = EOS_RESIDUAL
         elif (pv2 == _TRI_NEIGHBOR).any():                # slot-2 triangle marker
-            pred_faces[i] = _canonical_face_12_np(np.concatenate([np.full(3, _TRI_PAD), ev0, ev1, np.clip(pv1, 0, 127)]))
+            pred_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, np.clip(pv1, 0, 127), np.full(3, _TRI_PAD)]))
         else:
             pred_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, np.clip(pv1, 0, 127), np.clip(pv2, 0, 127)]))
 

@@ -63,7 +63,7 @@ def test_quad_neighbor_target_and_winding():
 
 
 def test_triangle_neighbor_target():
-    faces = [A + B + C + D, [TRI_PAD] * 3 + B + C + E]            # neighbor is a triangle
+    faces = [A + B + C + D, B + C + E + [TRI_PAD] * 3]            # neighbor is a triangle (pad at end)
     neighbors = [[-1, 1, -1, -1], [0, -1, -1, -1]]
     tgt, _ = _builder().compute_targets(_batch(faces, neighbors), _mask(2, [(0, 1)]))
 

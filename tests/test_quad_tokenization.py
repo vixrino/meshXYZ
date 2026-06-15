@@ -6,7 +6,7 @@ are skipped in a numpy-only environment and run automatically when torch is pres
 
 Test categories
 ---------------
-1. TRI_PAD prefix  — triangle faces in unified 12-token layout have TRI_PAD at [0:3]
+1. TRI_PAD suffix  — triangle faces in unified 12-token layout have TRI_PAD at [9:12]
 2. Quad no-prefix  — quad faces occupy all 12 positions with coordinate tokens
 3. Canonical ordering — smallest ZYX vertex is rotated to position 0 (tri and quad)
 4. Round-trip      — tokenize → detokenize → geometry matches the original
@@ -53,11 +53,11 @@ def _write_obj(tmp_path, content: str, name: str = "mesh.obj") -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. TRI_PAD prefix
+# 1. TRI_PAD suffix
 # ---------------------------------------------------------------------------
 
-def test_tri_pad_at_positions_0_1_2():
-    """All triangle rows in the unified sequence must start with [TRI_PAD, TRI_PAD, TRI_PAD]."""
+def test_tri_pad_at_positions_9_10_11():
+    """All triangle rows in the unified sequence must end with [TRI_PAD, TRI_PAD, TRI_PAD]."""
     verts_q = np.array([
         [ 0,  0,  0],
         [10,  0,  0],
@@ -73,11 +73,11 @@ def test_tri_pad_at_positions_0_1_2():
     assert face_seq_12.shape == (2, 12)
     assert not is_quad.any()
 
-    assert (face_seq_12[:, 0] == TRI_PAD).all()
-    assert (face_seq_12[:, 1] == TRI_PAD).all()
-    assert (face_seq_12[:, 2] == TRI_PAD).all()
-    assert (face_seq_12[:, 3:] <= QUANT_MAX).all()
-    assert (face_seq_12[:, 3:] >= 0).all()
+    assert (face_seq_12[:, 9]  == TRI_PAD).all()
+    assert (face_seq_12[:, 10] == TRI_PAD).all()
+    assert (face_seq_12[:, 11] == TRI_PAD).all()
+    assert (face_seq_12[:, :9] <= QUANT_MAX).all()
+    assert (face_seq_12[:, :9] >= 0).all()
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def test_tri_pad_at_positions_0_1_2():
 # ---------------------------------------------------------------------------
 
 def test_quad_has_no_tri_pad():
-    """Quad faces must not start with TRI_PAD; all 12 positions are coord tokens."""
+    """Quad faces carry no TRI_PAD; all 12 positions are coord tokens."""
     verts_q = np.array([
         [ 0,  0,  0],
         [20,  0,  0],
@@ -100,7 +100,7 @@ def test_quad_has_no_tri_pad():
 
     assert face_seq_12.shape == (1, 12)
     assert is_quad.all()
-    assert face_seq_12[0, 0] != TRI_PAD
+    assert face_seq_12[0, 9] != TRI_PAD
     assert (face_seq_12[0] <= QUANT_MAX).all()
     assert (face_seq_12[0] >= 0).all()
 
@@ -184,8 +184,8 @@ def test_tri_round_trip():
     faces_tri = np.array([[0, 1, 2]], dtype=np.int64)
 
     seq9 = _normalize_face_vertices(faces_tri, verts_q)
-    seq12 = np.concatenate([np.full((1, 3), TRI_PAD, dtype=np.int64), seq9], axis=1)
-    coords = seq12[0, 3:].reshape(3, 3)
+    seq12 = np.concatenate([seq9, np.full((1, 3), TRI_PAD, dtype=np.int64)], axis=1)
+    coords = seq12[0, :9].reshape(3, 3)
 
     for row in coords:
         assert any(np.array_equal(row, verts_q[i]) for i in range(3)), (
@@ -228,8 +228,8 @@ def test_mixed_round_trip(tmp_path):
     face_seq_12, is_quad = _to_unified_12_tokens(seq_tri, seq_quad, TRI_PAD)
 
     assert face_seq_12.shape == (2, 12)
-    assert (face_seq_12[~is_quad, 0] == TRI_PAD).all()
-    assert (face_seq_12[is_quad,  0] != TRI_PAD).all()
+    assert (face_seq_12[~is_quad, 9] == TRI_PAD).all()
+    assert (face_seq_12[is_quad,  9] != TRI_PAD).all()
 
 
 # ---------------------------------------------------------------------------
@@ -445,12 +445,16 @@ def test_process_mesh_quad_output_shapes():
     assert pc.shape        == (128, 3)
     assert face_seq.shape  == (2, 12)
     assert neighbors.shape == (2, 4)
-    # Tri face (index 0): TRI_PAD at positions 0-2
-    assert face_seq[0, 0] == TRI_PAD
-    assert face_seq[0, 1] == TRI_PAD
-    assert face_seq[0, 2] == TRI_PAD
-    # Quad face (index 1): no TRI_PAD
-    assert face_seq[1, 0] != TRI_PAD
+    # Identify the tri vs quad row by the trailing-pad oracle (rows are ZYX-sorted,
+    # so we can't assume a fixed index).  Exactly one triangle, one quad.
+    is_tri_row = face_seq[:, 9] == TRI_PAD
+    assert is_tri_row.sum() == 1
+    tri  = face_seq[is_tri_row][0]
+    quad = face_seq[~is_tri_row][0]
+    # Tri face: TRI_PAD at trailing positions 9-11
+    assert (tri[9:12] == TRI_PAD).all()
+    # Quad face: no trailing TRI_PAD
+    assert quad[9] != TRI_PAD
 
 
 def test_process_mesh_tri_mode_unchanged():
@@ -489,4 +493,4 @@ def test_process_mesh_quad_only(tmp_path):
     assert face_seq.shape  == (2, 12)
     assert neighbors.shape == (2, 4)
     # No TRI_PAD — all quad faces
-    assert (face_seq[:, 0] != TRI_PAD).all()
+    assert (face_seq[:, 9] != TRI_PAD).all()

@@ -14,27 +14,27 @@ def _import():
 
 
 def test_canonical_face_12_triangle_basic():
-    """Triangle: TRI_PAD forced at 0-2; coord vertices rotated to put minimum first.
+    """Triangle: coord vertices rotated to put minimum first; TRI_PAD forced at 9-11.
 
     Input vertices (in ZYX storage):
         v0 = (10, 20, 30),  v1 = (5, 5, 5),  v2 = (50, 50, 50)
     Comparison key = (v[2], v[1], v[0]):
         v0 key = (30, 20, 10),  v1 key = (5, 5, 5),  v2 key = (50, 50, 50)
     min is v1 → roll by -1 → order becomes [v1, v2, v0]
-    Expected output: [TRI_PAD, TRI_PAD, TRI_PAD, 5,5,5, 50,50,50, 10,20,30]
+    Expected output: [5,5,5, 50,50,50, 10,20,30, TRI_PAD, TRI_PAD, TRI_PAD]
     """
     canonical_face_12, TRI_PAD, _ = _import()
 
     face = torch.tensor(
-        [TRI_PAD, TRI_PAD, TRI_PAD, 10, 20, 30, 5, 5, 5, 50, 50, 50],
+        [10, 20, 30, 5, 5, 5, 50, 50, 50, TRI_PAD, TRI_PAD, TRI_PAD],
         dtype=torch.long,
     )
     result = canonical_face_12(face)
 
-    assert result[:3].tolist()  == [TRI_PAD, TRI_PAD, TRI_PAD], "pad prefix must be TRI_PAD"
-    assert result[3:6].tolist() == [5, 5, 5],     "min vertex must be first"
-    assert result[6:9].tolist() == [50, 50, 50]
-    assert result[9:12].tolist() == [10, 20, 30]
+    assert result[0:3].tolist() == [5, 5, 5],     "min vertex must be first"
+    assert result[3:6].tolist() == [50, 50, 50]
+    assert result[6:9].tolist() == [10, 20, 30]
+    assert result[9:12].tolist() == [TRI_PAD, TRI_PAD, TRI_PAD], "trailing pad must be TRI_PAD"
     assert len(result) == 12
 
 
@@ -62,11 +62,11 @@ def test_canonical_face_12_quad_basic():
 
 
 def test_canonical_face_12_inconsistent_pad_positions():
-    """Policy: token[0] is the sole oracle for face type.
+    """Policy: token[9] is the sole oracle for face type.
 
-    Case: token[0] is coord-valid (≤ QUANT_MAX = 127) but token[1] = TRI_PAD (129).
-    Interpretation: face type = QUAD (token[0] rules).
-    Behaviour: TRI_PAD at position 1 is clamped to QUANT_MAX (127).
+    Case: token[9] is coord-valid (≤ QUANT_MAX = 127) but token[1] = TRI_PAD (129).
+    Interpretation: face type = QUAD (token[9] rules).
+    Behaviour: the rogue TRI_PAD at position 1 is clamped to QUANT_MAX (127).
     No TRI_PAD value should appear anywhere in the output.
 
     Input layout (quad):

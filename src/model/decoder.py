@@ -74,11 +74,12 @@ class MLP(nn.Module):
         anchor is repeated to cover all n_coords (works for n_coords=3, 9 or 12).
 
         is_tri (12-token unified layout only): bool mask, True for triangle faces.
-        A triangle's positions 0-2 hold TRI_PAD=129, which falls in the remapping
-        dead-zone [n_abs, n_rel_coords) that is forced to -inf below — so it could
-        never be predicted.  For those rows the prefix positions are restored to
-        the raw (un-remapped) absolute-vocab logits, leaving TRI_PAD predictable;
-        coordinate positions 3-11 are still remapped relative to the anchor.
+        A triangle's positions 9-11 hold TRI_PAD=129 (padding moved to the END of
+        the block), which falls in the remapping dead-zone [n_abs, n_rel_coords)
+        that is forced to -inf below — so it could never be predicted.  For those
+        rows the trailing pad positions are restored to the raw (un-remapped)
+        absolute-vocab logits, leaving TRI_PAD predictable; coordinate positions
+        0-8 are still remapped relative to the anchor.
         When is_tri is None (9-token tri-only / quad coord positions) the behaviour
         is unchanged.
         """
@@ -100,9 +101,9 @@ class MLP(nn.Module):
         out[..., n_rel_coords:] = rel_logits[..., n_rel_coords:]
 
         if is_tri is not None and n_coords == 12:
-            prefix = torch.zeros(n_coords, dtype=torch.bool, device=rel_logits.device)
-            prefix[:3] = True   # TRI_PAD positions of a triangle face
-            keep_raw = is_tri.view(BN, 1, 1) & prefix.view(1, n_coords, 1)
+            pad_pos = torch.zeros(n_coords, dtype=torch.bool, device=rel_logits.device)
+            pad_pos[9:] = True   # TRI_PAD positions of a triangle face (end of block)
+            keep_raw = is_tri.view(BN, 1, 1) & pad_pos.view(1, n_coords, 1)
             out = torch.where(keep_raw, rel_logits, out)
 
         return out
@@ -156,10 +157,11 @@ class Decoder(nn.Module):
 
         # ── Safety guards ────────────────────────────────────────────────────
         # relative=True with n_face_tokens=12 is supported: the anchor is the real
-        # first vertex (TRI_PAD-aware, see _relative_anchor) and the TRI_PAD prefix
-        # of triangle faces keeps raw absolute-vocab logits (see _rel_to_abs_logits)
-        # instead of being remapped into the residual dead-zone.  All it requires is
-        # a vocab large enough to hold the TRI_PAD and EOS_RESIDUAL classes.
+        # first vertex (always positions 0-2 now, see _relative_anchor) and the
+        # trailing TRI_PAD pad of triangle faces keeps raw absolute-vocab logits
+        # (see _rel_to_abs_logits) instead of being remapped into the residual
+        # dead-zone.  All it requires is a vocab large enough to hold the TRI_PAD
+        # and EOS_RESIDUAL classes.
         if cfg.relative and cfg.n_face_tokens == 12:
             # Highest target class in 12-token edge-cond mode is TRI_NEIGHBOR (256),
             # the slot-2 triangle marker (distinct from the slot-1 STOP=EOS_RESIDUAL).
@@ -213,15 +215,11 @@ class Decoder(nn.Module):
     ) -> Int[Tensor, "batch faces 3"]:
         """Real first vertex v0 used as the relative-coordinate anchor.
 
-        - 9-token (tri-only) or a 12-token quad: v0 = positions 0-2.
-        - 12-token triangle: positions 0-2 are TRI_PAD, the real v0 = positions 3-5.
-
-        Detection uses the exact integer oracle (face_input[..., 0] == TRI_PAD),
-        the same one used by the spherical embedding, never a float threshold.
+        With TRI_PAD moved to the END of the block, positions 0-2 are always the
+        real first vertex — triangle and quad alike, in both the 9- and 12-token
+        layouts.  No face-type branch is needed (the former prefix special-case is
+        gone).
         """
-        if self.cfg.n_face_tokens == 12:
-            is_tri = (face_input[..., 0] == TRI_PAD).unsqueeze(-1)
-            return torch.where(is_tri, face_input[..., 3:6], face_input[..., 0:3])
         return face_input[..., 0:3]
 
     def embed_faces(
@@ -235,11 +233,12 @@ class Decoder(nn.Module):
         # linear layer can distinguish pad positions from real coordinates.
         f = face_input.to(dtype=dtype) / (QUANT_MAX + 1)
         if self.cfg.use_spherical_embed:
-            # Detect the triangle prefix on the RAW integer tokens (exact
-            # == TRI_PAD), not on the normalized float, so face-type detection
-            # never depends on a float threshold.  Only meaningful for the
-            # 12-token unified layout; 9-token tri-only passes is_tri=None.
-            is_tri = face_input[..., 0] == TRI_PAD if face_input.shape[-1] == 12 else None
+            # Detect triangles on the RAW integer tokens (exact == TRI_PAD), not on
+            # the normalized float, so face-type detection never depends on a float
+            # threshold.  TRI_PAD sits at the END of the block now (positions 9-11),
+            # so read position 9.  Only meaningful for the 12-token unified layout;
+            # 9-token tri-only passes is_tri=None.
+            is_tri = face_input[..., 9] == TRI_PAD if face_input.shape[-1] == 12 else None
             f = face_cartesian_to_spherical(f, is_tri=is_tri)
         emb = self.face_embed(f)
         if self.cfg.use_pos_embed:
@@ -267,12 +266,12 @@ class Decoder(nn.Module):
 
         qe_flat = query_edges.reshape(B * N, 6) if query_edges is not None else None
         # face_v0 / is_tri are used only when relative=True.  The anchor is the real
-        # first vertex (TRI_PAD-aware for the 12-token layout); is_tri lets the MLP
-        # keep raw logits at the TRI_PAD prefix so TRI_PAD stays predictable.
+        # first vertex (always positions 0-2); is_tri lets the MLP keep raw logits at
+        # the trailing TRI_PAD pad (positions 9-11) so TRI_PAD stays predictable.
         face_v0 = self._relative_anchor(face_input).reshape(B * N, 3)
         is_tri_flat = None
         if self.cfg.relative and self.cfg.n_face_tokens == 12:
-            is_tri_flat = (face_input[..., 0] == TRI_PAD).reshape(B * N)
+            is_tri_flat = (face_input[..., 9] == TRI_PAD).reshape(B * N)
         logits  = self.mlp(
             x.reshape(B * N, self.cfg.d_hidden),
             query_edges=qe_flat, face_v0=face_v0, is_tri=is_tri_flat,

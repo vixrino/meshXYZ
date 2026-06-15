@@ -184,13 +184,13 @@ def main() -> None:
         from src.constants import TRI_PAD as _TRI_PAD, QUANT_MAX as _QM, EOS_RESIDUAL as _EOS, PAD_TARGET as _PAD
         from src.training.loss import valid_row_mask as _vrm
         _t2 = targets.clone(); _t2[~_vrm(faces)] = _PAD
-        _tgt0, _valid = _t2[:, :, 0], _t2[:, :, 0] != _PAD
+        _tgt9, _valid = _t2[:, :, 9], _t2[:, :, 9] != _PAD   # face-type marker at trailing pad slot
         _is_eos   = ((_t2 == _EOS).any(-1)) & _valid
-        _is_tri_t = (_tgt0 == _TRI_PAD) & _valid & ~_is_eos
-        _is_qd_t  = (_tgt0 >= 0) & (_tgt0 <= _QM) & _valid & ~_is_eos
-        _pred0    = logits[:, :, 0].argmax(-1)
-        _tri_acc  = ((_pred0 == _TRI_PAD) & _is_tri_t).float().sum() / _is_tri_t.float().sum().clamp(min=1)
-        _qd_acc   = ((_pred0 <= _QM) & _is_qd_t).float().sum()  / _is_qd_t.float().sum().clamp(min=1)
+        _is_tri_t = (_tgt9 == _TRI_PAD) & _valid & ~_is_eos
+        _is_qd_t  = (_tgt9 >= 0) & (_tgt9 <= _QM) & _valid & ~_is_eos
+        _pred9    = logits[:, :, 9].argmax(-1)
+        _tri_acc  = ((_pred9 == _TRI_PAD) & _is_tri_t).float().sum() / _is_tri_t.float().sum().clamp(min=1)
+        _qd_acc   = ((_pred9 <= _QM) & _is_qd_t).float().sum()  / _is_qd_t.float().sum().clamp(min=1)
         n_tri_t   = _is_tri_t.sum().item()
         n_qd_t    = _is_qd_t.sum().item()
 
@@ -307,7 +307,7 @@ def main() -> None:
             ax2.axvspan(75, N_STEPS, alpha=0.06, color="#2980b9", label="Phase 3: context-aware")
         ax2.set_xlabel("Training step")
         ax2.set_ylabel("Accuracy")
-        ax2.set_title("Face-type accuracy\n(TRI_PAD prefix vs quad coord at position 0)")
+        ax2.set_title("Face-type accuracy\n(TRI_PAD pad vs quad coord at position 9)")
         ax2.set_ylim(-0.05, 1.05)
         ax2.legend(fontsize=8)
         ax2.grid(True, alpha=0.3)

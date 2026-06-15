@@ -2,7 +2,7 @@
 
 Tests the three fixes that had no existing coverage:
   1. _apply_perm with T=12 faces and S=4 neighbor slots
-  2. CanonicalOrdering with TRI_PAD-aware key (12-token mode)
+  2. CanonicalOrdering keyed on the first real vertex at 0-2 (12-token mode)
   3. CausalAxisOrdering with T=12 (would crash before the fix)
 
 All tests require torch and are skipped automatically in environments
@@ -25,8 +25,8 @@ from src.constants import TRI_PAD, QUANT_MAX
 # ---------------------------------------------------------------------------
 
 def _tri_face_12(x: int, y: int, z: int) -> list[int]:
-    """12-token triangle face with first real vertex at (x,y,z)."""
-    return [TRI_PAD, TRI_PAD, TRI_PAD, x, y, z, x + 1, y, z, x, y + 1, z]
+    """12-token triangle face with first real vertex at (x,y,z), trailing TRI_PAD."""
+    return [x, y, z, x + 1, y, z, x, y + 1, z, TRI_PAD, TRI_PAD, TRI_PAD]
 
 
 def _quad_face_12(x: int, y: int, z: int) -> list[int]:
@@ -118,8 +118,8 @@ class TestCanonicalOrderingQuad:
 
     def test_tri_face_sorts_by_real_vertex_not_tri_pad(self):
         """A triangle face with real vertex near origin must sort before a quad
-        face with first vertex at (10,10,10).  Before the fix, TRI_PAD (=129)
-        at positions 0-2 gave the triangle a huge key, placing it after the quad."""
+        face with first vertex at (10,10,10).  With TRI_PAD moved to the end, the
+        first real vertex is always at 0-2, so the sort key is the real vertex."""
         B, N = 1, 2
         # Face 0: triangle, real first vertex = (0, 0, 0) → key = 0
         # Face 1: quad, first vertex = (10, 10, 10) → key = 10*128²+10*128+10 = 165898
@@ -179,8 +179,8 @@ class TestCausalAxisOrdering:
         """Random 12-token batch with a mix of tri and quad faces."""
         T, S = 12, 4
         faces = torch.randint(0, QUANT_MAX, (B, N, T), dtype=torch.long)
-        # Make half the faces triangles (set positions 0-2 to TRI_PAD)
-        faces[:, ::2, :3] = TRI_PAD
+        # Make half the faces triangles (set the trailing positions 9-11 to TRI_PAD)
+        faces[:, ::2, 9:] = TRI_PAD
         neighbors = torch.full((B, N, S), -1, dtype=torch.long)
         lengths   = torch.tensor([N] * B)
         return faces, neighbors, lengths

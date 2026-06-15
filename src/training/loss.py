@@ -130,7 +130,7 @@ def decompose_loss(
     EOS_RESIDUAL=255 and TRI_NEIGHBOR=256 are both > TRI_PAD, and all four masks
     are mutually exclusive):
 
-        target == TRI_PAD (129)          → loss_tri_pad   (positions 0-2 of tri-target faces)
+        target == TRI_PAD (129)          → loss_tri_pad   (positions 9-11 of tri-target faces)
         target in [0, QUANT_MAX] (0-127) → loss_coord     (coord slots of both tri and quad faces)
         target == EOS_RESIDUAL (255)     → loss_eos       (slot-1 STOP: edge has no neighbor)
         target == TRI_NEIGHBOR (256)     → loss_tri_nbr   (slot-2 marker: neighbor is a triangle)
@@ -145,7 +145,7 @@ def decompose_loss(
     comparable in magnitude even when one category has very few positions.
 
     Expected training dynamics:
-        loss_tri_pad: drops fast (model learns the deterministic TRI_PAD prefix in ~20 steps)
+        loss_tri_pad: drops fast (model learns the deterministic trailing TRI_PAD pad in ~20 steps)
         loss_coord:   drops more slowly as the model learns geometry
         loss_eos:     typically low and stable (few EOS positions)
     """
@@ -182,31 +182,32 @@ def face_type_acc(
 ) -> "Float[Tensor, '']":
     """Fraction of real non-EOS faces where the model correctly predicts the face type.
 
-    Face type is determined from position 0 of the *target* (the face to predict):
-        target[0] == TRI_PAD (129)       → triangle target; correct if argmax(logits[0]) == TRI_PAD
-        target[0] in [0, QUANT_MAX=127]  → quad target;    correct if argmax(logits[0]) <= QUANT_MAX
+    Face type is determined from position 9 of the *target* (the trailing pad slot;
+    padding moved to the END of the block):
+        target[9] == TRI_PAD (129)       → triangle target; correct if argmax(logits[9]) == TRI_PAD
+        target[9] in [0, QUANT_MAX=127]  → quad target;    correct if argmax(logits[9]) <= QUANT_MAX
 
     EOS faces (any target position is EOS_RESIDUAL) and padding rows are excluded.
 
     This is the primary sanity check that the model has learned the topology
-    distinction: TRI_PAD at position 0 means "the next face is a triangle; fill
-    positions 0-2 with pad tokens before predicting the 3 vertices".
+    distinction: TRI_PAD at position 9 means "the next face is a triangle; fill
+    positions 9-11 with pad tokens after the 3 vertices".
     """
     if faces is not None:
         targets = targets.clone()
         targets[~valid_row_mask(faces)] = pad_value
 
-    tgt0  = targets[:, :, 0]                                    # (B, F)
-    valid = tgt0 != pad_value                                    # non-padding rows
+    tgt_type = targets[:, :, 9]                                  # (B, F) — trailing pad slot
+    valid    = tgt_type != pad_value                            # non-padding rows
 
     is_eos         = (targets == EOS_RESIDUAL).any(dim=-1) & valid
-    is_tri_target  = (tgt0 == TRI_PAD)                & valid & ~is_eos
-    is_quad_target = (tgt0 >= 0) & (tgt0 <= QUANT_MAX) & valid & ~is_eos
+    is_tri_target  = (tgt_type == TRI_PAD)                    & valid & ~is_eos
+    is_quad_target = (tgt_type >= 0) & (tgt_type <= QUANT_MAX) & valid & ~is_eos
 
-    pred0 = logits[:, :, 0].argmax(-1)                          # (B, F) argmax at position 0
+    pred_type = logits[:, :, 9].argmax(-1)                      # (B, F) argmax at position 9
 
-    tri_correct  = (pred0 == TRI_PAD)   & is_tri_target
-    quad_correct = (pred0 <= QUANT_MAX) & is_quad_target
+    tri_correct  = (pred_type == TRI_PAD)   & is_tri_target
+    quad_correct = (pred_type <= QUANT_MAX) & is_quad_target
 
     n_typed   = (is_tri_target | is_quad_target).float().sum().clamp(min=1)
     n_correct = (tri_correct   | quad_correct  ).float().sum()

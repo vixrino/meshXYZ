@@ -23,10 +23,10 @@ def _face_tokens_to_verts_edges(
         edges  = [(0,1), (1,2), (2,0)]
 
     n_face_tokens == 12 (unified block):
-        token[0] > QUANT_MAX  → triangle (TRI_PAD prefix):
-            verts  = [tokens[3:6], tokens[6:9], tokens[9:12]]
+        token[9] > QUANT_MAX  → triangle (TRI_PAD pad at the end):
+            verts  = [tokens[0:3], tokens[3:6], tokens[6:9]]
             edges  = [(0,1), (1,2), (2,0)]
-        token[0] ≤ QUANT_MAX  → quad:
+        token[9] ≤ QUANT_MAX  → quad:
             verts  = [tokens[0:3], tokens[3:6], tokens[6:9], tokens[9:12]]
             edges  = [(0,1), (1,2), (2,3), (3,0)]
     """
@@ -34,8 +34,8 @@ def _face_tokens_to_verts_edges(
         verts = [face_tokens[0:3], face_tokens[3:6], face_tokens[6:9]]
         return verts, [(0, 1), (1, 2), (2, 0)]
     # 12-token unified block
-    if face_tokens[0] > QUANT_MAX:          # TRI_PAD at position 0 → triangle
-        verts = [face_tokens[3:6], face_tokens[6:9], face_tokens[9:12]]
+    if face_tokens[9] > QUANT_MAX:          # TRI_PAD at position 9 → triangle
+        verts = [face_tokens[0:3], face_tokens[3:6], face_tokens[6:9]]
         return verts, [(0, 1), (1, 2), (2, 0)]
     # quad
     verts = [face_tokens[0:3], face_tokens[3:6], face_tokens[6:9], face_tokens[9:12]]
@@ -199,7 +199,7 @@ class MeshTransformer(nn.Module):
                         if (v2 == TRI_NEIGHBOR).any():               # slot 2 TRI_NEIGHBOR → triangle neighbor
                             tri = torch.stack([ev0, ev1, v1.clamp(0, QUANT_MAX)]).reshape(9)
                             pad = curr_faces.new_full((3,), TRI_PAD)
-                            new_face = canonical_face_12(torch.cat([pad, tri]))
+                            new_face = canonical_face_12(torch.cat([tri, pad]))  # pad at the END
                             conf_coords, conf_pred = coord_logits[0:3], v1
                         else:                                         # quad neighbor (2 new verts)
                             quad = torch.stack(
@@ -254,7 +254,7 @@ class MeshTransformer(nn.Module):
 
                     probs = coord_logits.softmax(-1)
                     # TODO: for quad mode, filter to coord-only positions
-                    #       (skip TRI_PAD slots 0-2 for triangle faces)
+                    #       (skip TRI_PAD slots 9-11 for triangle faces)
                     step_probs.append(probs[torch.arange(n_face_tokens), pred].cpu().numpy())
 
                 new_idx = curr_faces.shape[0]

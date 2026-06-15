@@ -38,7 +38,7 @@ decoder.eval()
 # ── Synthetic mixed batch: 6 triangles + 4 quads ──────────────────────────
 B, F = 2, 10
 faces = torch.randint(0, QUANT_MAX, (B, F, 12))   # all quads initially
-faces[:, :6, :3] = TRI_PAD                        # mark first 6 rows as triangles
+faces[:, :6, 9:] = TRI_PAD                        # mark first 6 rows as triangles (pad at end)
 
 # Fake latents (as if from encoder with d_latent=8, 16 latent slots)
 C = torch.randn(B, 16, cfg.d_latent)
@@ -63,12 +63,12 @@ for b_idx, f_idx, label in [(0, 0, "batch 0, face 0  [TRI input]"),
                               (0, 7, "batch 0, face 7  [QUAD input]")]:
     pred   = logits[b_idx, f_idx].argmax(-1).tolist()   # (12,)
     inp    = faces[b_idx, f_idx].tolist()
-    is_tri = inp[0] == TRI_PAD
+    is_tri = inp[9] == TRI_PAD
     print(f"  {label}")
     print(f"    input  tokens: {inp}")
     print(f"    argmax tokens: {pred}")
-    print(f"    pred type:     {'TRI' if pred[0] > QUANT_MAX else 'QUAD'}"
-          f"  (based on pred[0]={pred[0]})")
+    print(f"    pred type:     {'TRI' if pred[9] > QUANT_MAX else 'QUAD'}"
+          f"  (based on pred[9]={pred[9]})")
     print()
 
 print("✓  All assertions passed.")

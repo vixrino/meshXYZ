@@ -178,10 +178,10 @@ def main():
             tok_display = f"{v_str}"
         else:
             label     = "TRI"
-            pad_vals  = face[:3].tolist()   # should all be TRI_PAD=129
-            verts_tok = face[3:].reshape(3, 3)
+            pad_vals  = face[9:].tolist()   # should all be TRI_PAD=129 (pad at end)
+            verts_tok = face[:9].reshape(3, 3)
             v_str = "  ".join(f"({r[0]:3d},{r[1]:3d},{r[2]:3d})" for r in verts_tok)
-            tok_display = f"[pad={pad_vals[0]}×3] {v_str}"
+            tok_display = f"{v_str} [pad={pad_vals[0]}×3]"
 
         nbr_fmt = str(nbrs)
         print(f"  {i:>3}  {label:>8}  {tok_display:<58}  {nbr_fmt}")
@@ -202,12 +202,12 @@ def main():
     quad_rows = face_seq_12[is_quad]
 
     checks = [
-        ("All tri  rows: tokens[0:3] == TRI_PAD",
-         (tri_rows[:, :3] == TRI_PAD).all() if len(tri_rows) > 0 else True),
-        ("All tri  rows: tokens[3:12] in [0,QUANT_MAX]",
-         ((tri_rows[:, 3:] >= 0) & (tri_rows[:, 3:] <= QUANT_MAX)).all() if len(tri_rows) > 0 else True),
-        ("All quad rows: tokens[0] != TRI_PAD",
-         (quad_rows[:, 0] != TRI_PAD).all() if len(quad_rows) > 0 else True),
+        ("All tri  rows: tokens[9:12] == TRI_PAD",
+         (tri_rows[:, 9:] == TRI_PAD).all() if len(tri_rows) > 0 else True),
+        ("All tri  rows: tokens[0:9] in [0,QUANT_MAX]",
+         ((tri_rows[:, :9] >= 0) & (tri_rows[:, :9] <= QUANT_MAX)).all() if len(tri_rows) > 0 else True),
+        ("All quad rows: tokens[9] != TRI_PAD",
+         (quad_rows[:, 9] != TRI_PAD).all() if len(quad_rows) > 0 else True),
         ("All quad rows: tokens[0:12] in [0,QUANT_MAX]",
          ((quad_rows >= 0) & (quad_rows <= QUANT_MAX)).all() if len(quad_rows) > 0 else True),
         ("Neighbors shape == (F, 4)",

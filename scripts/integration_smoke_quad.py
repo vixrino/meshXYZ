@@ -142,8 +142,8 @@ print(f"Sphere mesh:  {len(result.vertices)} verts | "
       f"{len(result.faces_tri)} tris | {len(result.faces_quad)} quads")
 print(f"Point cloud:  {pc_norm.shape}  (sampled {NUM_POINTS} pts)")
 print(f"Face tokens:  {face_seq_12.shape}  "
-      f"({(face_seq_12[:,0] == TRI_PAD).sum()} tri, "
-      f"{(face_seq_12[:,0] != TRI_PAD).sum()} quad)")
+      f"({(face_seq_12[:,9] == TRI_PAD).sum()} tri, "
+      f"{(face_seq_12[:,9] != TRI_PAD).sum()} quad)")
 print()
 
 # ── Prepare batch tensors ─────────────────────────────────────────────────

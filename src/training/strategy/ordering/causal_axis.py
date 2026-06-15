@@ -31,8 +31,10 @@ class CausalAxisOrdering(BaseOrdering):
             centroids = faces.double().reshape(B, N, 3, 3).mean(dim=2)  # (B, N, 3)
         else:
             # Unified 12-token layout: 4 vertex slots per face, but triangle faces
-            # carry TRI_PAD (129) at positions 0-2, marking those as non-real vertices.
-            # Average only over the valid (non-padded) vertices.
+            # carry TRI_PAD (129) in their trailing slot (positions 9-11), marking it
+            # a non-real vertex.  The all-slots pad test below is position-agnostic, so
+            # it works whether the pad is at the start or the end.  Average only over
+            # the valid (non-padded) vertices.
             verts  = faces.double().reshape(B, N, 4, 3)                  # (B, N, 4, 3)
             is_pad = (faces.reshape(B, N, 4, 3) == TRI_PAD).all(dim=-1)  # (B, N, 4) bool
             valid  = (~is_pad).double().unsqueeze(-1)                     # (B, N, 4, 1)
