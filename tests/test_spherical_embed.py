@@ -1,0 +1,109 @@
+"""Tests for face_cartesian_to_spherical with the unified 12-token quad/tri layout.
+
+Covers:
+  (a) a 12-coord quad,
+  (b) a 12-coord triangle with a TRI_PAD prefix,
+  (c) a pure 9-coord triangle (backward compatibility),
+plus the consistency guarantee that the triangle's spherical content is identical
+in the 9-coord and 12-coord (TRI_PAD-prefixed) layouts, a mixed batch, and the
+error path for an unsupported channel count.
+"""
+
+import math
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from src.constants import QUANT_MAX, TRI_PAD
+from src.utils.geometry import face_cartesian_to_spherical
+
+_NORM = QUANT_MAX + 1  # 128 — the divisor used in Decoder.embed_faces
+
+
+def _norm(int_tokens):
+    """Mimic embed_faces: integer tokens → float in [0, ~1.008]."""
+    return torch.tensor(int_tokens, dtype=torch.float64) / _NORM
+
+
+def _is_unit_interval(t):
+    return bool((t >= -1e-6).all() and (t <= 1 + 1e-6).all())
+
+
+def test_quad_12_shape_and_anchor():
+    # Real quad: four vertices, all coords in [0, QUANT_MAX].
+    quad = _norm([10, 20, 30,  10, 20, 90,  10, 80, 90,  10, 80, 30])
+    out = face_cartesian_to_spherical(quad)
+
+    assert out.shape == (12,)
+    # v0 anchor preserved untouched.
+    assert torch.allclose(out[0:3], quad[0:3])
+    # The three spherical triplets are normalized to [0, 1].
+    assert _is_unit_interval(out[3:12])
+
+
+def test_triangle_12_preserves_tri_pad_prefix():
+    pad = TRI_PAD
+    tri12 = _norm([pad, pad, pad,  10, 20, 30,  10, 20, 90,  10, 80, 90])
+    out = face_cartesian_to_spherical(tri12)
+
+    assert out.shape == (12,)
+    # TRI_PAD prefix passes through untouched (face-type signal survives).
+    assert torch.allclose(out[0:3], tri12[0:3])
+    # Prefix is still detectably out-of-range (normalized TRI_PAD = 129/128 > 1).
+    assert bool((out[0:3] > 1.0).all())
+    assert _is_unit_interval(out[6:12])
+
+
+def test_pure_9_coord_backward_compatible():
+    tri9 = _norm([10, 20, 30,  10, 20, 90,  10, 80, 90])
+    out = face_cartesian_to_spherical(tri9)
+
+    assert out.shape == (9,)
+    # v0 anchor preserved.
+    assert torch.allclose(out[0:3], tri9[0:3])
+    assert _is_unit_interval(out[3:9])
+
+
+def test_tri12_matches_tri9_on_spherical_part():
+    """The triangle's spherical content must be identical across both layouts."""
+    coords = [10, 20, 30,  10, 20, 90,  10, 80, 90]
+    tri9  = _norm(coords)
+    tri12 = _norm([TRI_PAD, TRI_PAD, TRI_PAD] + coords)
+
+    out9  = face_cartesian_to_spherical(tri9)
+    out12 = face_cartesian_to_spherical(tri12)
+
+    # Positions 3-11 of the 12-token output == positions 0-8 of the 9-token output.
+    assert torch.allclose(out12[3:12], out9, atol=1e-9)
+
+
+def test_known_spherical_value_along_z_axis():
+    # v0 at origin, v1 displaced purely along +z by 64 quant steps.
+    quad = _norm([0, 0, 0,  64, 0, 0,  0, 64, 0,  0, 0, 64])
+    out = face_cartesian_to_spherical(quad)
+
+    # sph(v1 - v0): d = (dz=64/128, 0, 0) → r = 0.5 / sqrt(3); theta = 0; phi = 0.5
+    r, theta, phi = out[3], out[4], out[5]
+    assert math.isclose(float(r),     (64 / _NORM) / math.sqrt(3), abs_tol=1e-9)
+    assert math.isclose(float(theta), 0.0,                          abs_tol=1e-9)
+    assert math.isclose(float(phi),   0.5,                          abs_tol=1e-9)
+
+
+def test_mixed_batch_tri_and_quad():
+    """A batch containing both a TRI_PAD triangle and a quad is handled per-row."""
+    tri12 = [TRI_PAD, TRI_PAD, TRI_PAD, 10, 20, 30, 10, 20, 90, 10, 80, 90]
+    quad  = [10, 20, 30, 10, 20, 90, 10, 80, 90, 10, 80, 30]
+    batch = _norm([tri12, quad])              # (2, 12)
+    out = face_cartesian_to_spherical(batch)
+
+    assert out.shape == (2, 12)
+    # Row 0 (triangle): equals the standalone triangle result.
+    assert torch.allclose(out[0], face_cartesian_to_spherical(_norm(tri12)))
+    # Row 1 (quad): equals the standalone quad result.
+    assert torch.allclose(out[1], face_cartesian_to_spherical(_norm(quad)))
+
+
+def test_unsupported_channel_count_raises():
+    with pytest.raises(ValueError):
+        face_cartesian_to_spherical(torch.zeros(6, dtype=torch.float64))

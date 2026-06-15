@@ -11,7 +11,7 @@ decoder:
   vocab_size: 257          # 256 + 1 for TRI_PAD=129
   n_face_tokens: 12        # unified 12-token block (3 TRI_PAD + 9 coords for tri; 12 coords for quad)
   use_pos_embed: false
-  use_spherical_embed: false  # face_cartesian_to_spherical expects 9-coord input; 12-coord not supported
+  use_spherical_embed: true   # adapted for the 12-token unified block (quad + TRI_PAD-prefixed tri)
   relative: false          # relative mode anchors on face_input[:,:,:3]; TRI_PAD=129 there is not a coord
   use_edge_cond: false     # AdjacentTargetBuilder assumes 3 edges/face; disabled for quads
 

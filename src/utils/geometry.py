@@ -9,20 +9,36 @@ from ..constants import QUANT_MAX, TRI_PAD
 _SQRT3 = math.sqrt(3)
 
 
-def face_cartesian_to_spherical(face_norm: Float[Tensor, "... 9"]) -> Float[Tensor, "... 9"]:
-    """
-    Convert normalized face coords [v0, v1, v2] (all in [0,1)) to
-    [v0_global, r1, θ1, φ1, r2, θ2, φ2] where (r, θ, φ) are spherical
-    coords of the relative vectors (v1-v0) and (v2-v0), all normalized to [0, 1].
+def face_cartesian_to_spherical(face_norm: Float[Tensor, "... C"]) -> Float[Tensor, "... C"]:
+    """Spherical embedding of a normalized face, preserving the channel count.
 
-    Coordinate order within each vertex: (z, y, x).
-    Spherical convention: θ = polar angle from z-axis, φ = azimuthal in (y, x) plane.
-    """
-    v0 = face_norm[..., :3]   # (z0, y0, x0)
-    v1 = face_norm[..., 3:6]
-    v2 = face_norm[..., 6:9]
+    The vertex anchor v0 is kept absolute; every other vertex is encoded as the
+    spherical coords (r, θ, φ) of its vector relative to v0, each normalized to
+    [0, 1].  Coordinate order within each vertex is (z, y, x); θ is the polar
+    angle from the z-axis and φ the azimuth in the (y, x) plane.
 
-    def to_spherical(d: Tensor):
+    The layout is selected by the last-dim size C:
+
+    C == 9 — triangle-only (original format, unchanged):
+        input  [v0, v1, v2]
+        output [v0, sph(v1-v0), sph(v2-v0)]
+
+    C == 12 — unified quad/tri block.  Face type is read from position 0
+        (TRI_PAD prefix → triangle, real coord → quad), matching the oracle used
+        by canonical_face_12 and build_edge_adjacency_unified:
+
+        quad     input  [v0, v1, v2, v3]
+                 output [v0, sph(v1-v0), sph(v2-v0), sph(v3-v0)]
+
+        triangle input  [PAD, PAD, PAD, v0, v1, v2]
+                 output [PAD, PAD, PAD, v0, sph(v1-v0), sph(v2-v0)]
+
+        The TRI_PAD prefix is passed through untouched so the face-type signal
+        survives, and positions 3-11 are bit-identical to the C==9 result for the
+        same triangle.
+    """
+
+    def to_spherical(d: Tensor) -> Tensor:
         # d: (..., 3) with order (dz, dy, dx)
         r = d.norm(dim=-1, keepdim=True)                              # (..., 1)
         safe_r = r.clamp(min=1e-8)
@@ -33,9 +49,44 @@ def face_cartesian_to_spherical(face_norm: Float[Tensor, "... 9"]) -> Float[Tens
         phi_n   = (phi  + math.pi) / (2 * math.pi)                    # [0, 1]
         return torch.cat([r_n, theta_n, phi_n], dim=-1)
 
-    sph1 = to_spherical(v1 - v0)
-    sph2 = to_spherical(v2 - v0)
-    return torch.cat([v0, sph1, sph2], dim=-1)
+    C = face_norm.shape[-1]
+
+    if C == 9:
+        v0 = face_norm[..., 0:3]   # (z0, y0, x0)
+        v1 = face_norm[..., 3:6]
+        v2 = face_norm[..., 6:9]
+        return torch.cat([v0, to_spherical(v1 - v0), to_spherical(v2 - v0)], dim=-1)
+
+    if C == 12:
+        # Face-type oracle: position 0.  Real coords normalize to <= QUANT_MAX/128
+        # (= 0.992); TRI_PAD normalizes to 129/128 = 1.0078.  A threshold of 1.0
+        # separates them cleanly and is robust to float rounding of a real coord.
+        is_tri = face_norm[..., 0:1] > 1.0   # (..., 1) bool
+
+        # Quad interpretation: vertices at 0-2 / 3-5 / 6-8 / 9-11.
+        q_v0 = face_norm[..., 0:3]
+        quad_out = torch.cat([
+            q_v0,
+            to_spherical(face_norm[..., 3:6]  - q_v0),
+            to_spherical(face_norm[..., 6:9]  - q_v0),
+            to_spherical(face_norm[..., 9:12] - q_v0),
+        ], dim=-1)
+
+        # Triangle interpretation: TRI_PAD prefix at 0-2, real verts at 3-5/6-8/9-11.
+        prefix = face_norm[..., 0:3]
+        t_v0   = face_norm[..., 3:6]
+        tri_out = torch.cat([
+            prefix,
+            t_v0,
+            to_spherical(face_norm[..., 6:9]  - t_v0),
+            to_spherical(face_norm[..., 9:12] - t_v0),
+        ], dim=-1)
+
+        return torch.where(is_tri, tri_out, quad_out)
+
+    raise ValueError(
+        f"face_cartesian_to_spherical: expected last dim 9 or 12, got {C}."
+    )
 
 
 def canonical_face(verts: Int[Tensor, "3 3"]) -> Int[Tensor, "9"]:
