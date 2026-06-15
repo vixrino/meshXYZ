@@ -25,7 +25,8 @@ class DataCfg:
     #        backward-compatible with all existing triangle configs and checkpoints.
     # "quad": QuadGPT unified 12-token block — (F, 12) faces, (F, 4) neighbors.
     #         Triangles are padded with TRI_PAD at positions 0-2; quads use all 12 positions.
-    #         Requires vocab_size=257, use_edge_cond=false, relative=false in decoder config.
+    #         Requires vocab_size=257 in decoder config. relative=true is supported
+    #         (TRI_PAD-aware anchor + raw prefix logits); use_edge_cond=false for now.
     # Note: str not Literal["tri","quad"] — dacite silently drops Literal-typed fields
     # when the installed dacite version predates full Literal support, causing face_layout
     # to remain "tri" even when config says "quad".

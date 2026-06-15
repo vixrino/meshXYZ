@@ -12,7 +12,7 @@ decoder:
   n_face_tokens: 12        # unified 12-token block (3 TRI_PAD + 9 coords for tri; 12 coords for quad)
   use_pos_embed: false
   use_spherical_embed: true   # adapted for the 12-token unified block (quad + TRI_PAD-prefixed tri)
-  relative: false          # relative mode anchors on face_input[:,:,:3]; TRI_PAD=129 there is not a coord
+  relative: true           # 12-token: anchor on the real v0 (TRI_PAD-aware) + raw logits at the TRI_PAD prefix
   use_edge_cond: false     # AdjacentTargetBuilder assumes 3 edges/face; disabled for quads
 
 data:

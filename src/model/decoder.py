@@ -2,10 +2,10 @@ from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from ..constants import QUANT_MAX, TRI_PAD
+from ..constants import EOS_RESIDUAL, QUANT_MAX, TRI_PAD
 from ..utils.geometry import face_cartesian_to_spherical
 
 
@@ -62,10 +62,20 @@ class MLP(nn.Module):
         self,
         rel_logits: Float[Tensor, "batch_faces n_coords vocab"],
         anchor: Int[Tensor, "batch_faces 3"],
+        is_tri: "Bool[Tensor, 'batch_faces'] | None" = None,
     ) -> Float[Tensor, "batch_faces n_coords vocab"]:
         """Convert relative-residual logits to absolute-coordinate logits.
 
-        anchor is repeated to cover all n_coords (works for n_coords=3 or 9).
+        anchor is repeated to cover all n_coords (works for n_coords=3, 9 or 12).
+
+        is_tri (12-token unified layout only): bool mask, True for triangle faces.
+        A triangle's positions 0-2 hold TRI_PAD=129, which falls in the remapping
+        dead-zone [n_abs, n_rel_coords) that is forced to -inf below — so it could
+        never be predicted.  For those rows the prefix positions are restored to
+        the raw (un-remapped) absolute-vocab logits, leaving TRI_PAD predictable;
+        coordinate positions 3-11 are still remapped relative to the anchor.
+        When is_tri is None (9-token tri-only / quad coord positions) the behaviour
+        is unchanged.
         """
         BN, n_coords, _ = rel_logits.shape
         n_abs        = QUANT_MAX + 1       # absolute coordinate slots: [0, QUANT_MAX]
@@ -84,6 +94,12 @@ class MLP(nn.Module):
         out[..., :n_abs]        = abs_logits
         out[..., n_rel_coords:] = rel_logits[..., n_rel_coords:]
 
+        if is_tri is not None and n_coords == 12:
+            prefix = torch.zeros(n_coords, dtype=torch.bool, device=rel_logits.device)
+            prefix[:3] = True   # TRI_PAD positions of a triangle face
+            keep_raw = is_tri.view(BN, 1, 1) & prefix.view(1, n_coords, 1)
+            out = torch.where(keep_raw, rel_logits, out)
+
         return out
 
     def forward(
@@ -91,6 +107,7 @@ class MLP(nn.Module):
         h: Float[Tensor, "batch_faces d_hidden"],
         query_edges: "Int[Tensor, 'batch_faces 6'] | None" = None,
         face_v0: "Int[Tensor, 'batch_faces 3'] | None" = None,
+        is_tri: "Bool[Tensor, 'batch_faces'] | None" = None,
     ) -> Float[Tensor, "batch_faces n_face_tokens vocab"]:
         """Returns (BN, n_face_tokens, vocab).
 
@@ -115,7 +132,7 @@ class MLP(nn.Module):
         logits = self.net(fused).reshape(-1, n_coords, self.vocab_size)
 
         if self.relative:
-            logits = self._rel_to_abs_logits(logits, face_v0)
+            logits = self._rel_to_abs_logits(logits, face_v0, is_tri=is_tri)
 
         if self.use_edge_cond:
             zeros_6 = torch.zeros(
@@ -133,14 +150,17 @@ class Decoder(nn.Module):
         self.cfg = cfg
 
         # ── Safety guards ────────────────────────────────────────────────────
-        # relative=True anchors on face_input[:,:,:3]; for n_face_tokens=12 those
-        # positions hold TRI_PAD=129 (triangle faces), which is outside [0,QUANT_MAX]
-        # and would corrupt _rel_to_abs_logits.  Catch this early.
-        assert not (cfg.relative and cfg.n_face_tokens == 12), (
-            "relative=True is incompatible with n_face_tokens=12: TRI_PAD (=129) at "
-            "positions 0-2 of a triangle face would be used as the coordinate anchor "
-            "in _rel_to_abs_logits.  Set relative=False in your quad config."
-        )
+        # relative=True with n_face_tokens=12 is supported: the anchor is the real
+        # first vertex (TRI_PAD-aware, see _relative_anchor) and the TRI_PAD prefix
+        # of triangle faces keeps raw absolute-vocab logits (see _rel_to_abs_logits)
+        # instead of being remapped into the residual dead-zone.  All it requires is
+        # a vocab large enough to hold the TRI_PAD and EOS_RESIDUAL classes.
+        if cfg.relative and cfg.n_face_tokens == 12:
+            assert cfg.vocab_size > EOS_RESIDUAL, (
+                "relative=True with n_face_tokens=12 needs vocab_size > EOS_RESIDUAL "
+                f"({EOS_RESIDUAL}) so TRI_PAD/EOS classes are representable; "
+                f"got vocab_size={cfg.vocab_size}."
+            )
         # use_edge_cond=True pads positions 0-5 (shared edge, 2×3 coords) and predicts
         # positions 6-8 (new vertex, 3 coords) — assumes exactly 9 token slots total.
         assert not (cfg.use_edge_cond and cfg.n_face_tokens != 9), (
@@ -175,6 +195,23 @@ class Decoder(nn.Module):
             relative=cfg.relative,
             n_face_tokens=cfg.n_face_tokens,
         )
+
+    def _relative_anchor(
+        self,
+        face_input: Int[Tensor, "batch faces n_face_tokens"],
+    ) -> Int[Tensor, "batch faces 3"]:
+        """Real first vertex v0 used as the relative-coordinate anchor.
+
+        - 9-token (tri-only) or a 12-token quad: v0 = positions 0-2.
+        - 12-token triangle: positions 0-2 are TRI_PAD, the real v0 = positions 3-5.
+
+        Detection uses the exact integer oracle (face_input[..., 0] == TRI_PAD),
+        the same one used by the spherical embedding, never a float threshold.
+        """
+        if self.cfg.n_face_tokens == 12:
+            is_tri = (face_input[..., 0] == TRI_PAD).unsqueeze(-1)
+            return torch.where(is_tri, face_input[..., 3:6], face_input[..., 0:3])
+        return face_input[..., 0:3]
 
     def embed_faces(
         self,
@@ -218,7 +255,15 @@ class Decoder(nn.Module):
         x = self.norm(x)
 
         qe_flat = query_edges.reshape(B * N, 6) if query_edges is not None else None
-        # face_v0 is used only when relative=True (which is False for n_face_tokens=12).
-        face_v0 = face_input[:, :, :3].reshape(B * N, 3)
-        logits  = self.mlp(x.reshape(B * N, self.cfg.d_hidden), query_edges=qe_flat, face_v0=face_v0)
+        # face_v0 / is_tri are used only when relative=True.  The anchor is the real
+        # first vertex (TRI_PAD-aware for the 12-token layout); is_tri lets the MLP
+        # keep raw logits at the TRI_PAD prefix so TRI_PAD stays predictable.
+        face_v0 = self._relative_anchor(face_input).reshape(B * N, 3)
+        is_tri_flat = None
+        if self.cfg.relative and self.cfg.n_face_tokens == 12:
+            is_tri_flat = (face_input[..., 0] == TRI_PAD).reshape(B * N)
+        logits  = self.mlp(
+            x.reshape(B * N, self.cfg.d_hidden),
+            query_edges=qe_flat, face_v0=face_v0, is_tri=is_tri_flat,
+        )
         return logits.reshape(B, N, self.cfg.n_face_tokens, self.cfg.vocab_size)
