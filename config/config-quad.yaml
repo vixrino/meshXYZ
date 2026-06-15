@@ -18,7 +18,7 @@ decoder:
 data:
   num_points: 2048
   num_workers: 4
-  augment: true
+  augment: false           # 3-mesh convergence test: memorize native quads, no aug noise
   face_layout: "quad"
 
 training:
