@@ -204,3 +204,45 @@ def face_type_acc(
     n_typed   = (is_tri_target | is_quad_target).float().sum().clamp(min=1)
     n_correct = (tri_correct   | quad_correct  ).float().sum()
     return n_correct / n_typed
+
+
+def edge_face_type_acc(
+    logits: Float[Tensor, "batch faces n_face_tokens vocab"],
+    targets: Int[Tensor, "batch faces n_face_tokens"],
+    faces: "Int[Tensor, 'batch faces n_face_tokens'] | None" = None,
+    pad_value: int = PAD_TARGET,
+) -> "Float[Tensor, '']":
+    """Edge-cond (12-token, Option A) monitor: triangle-neighbor vs quad-neighbor.
+
+    In edge-cond mode the neighbor topology is signalled by slot 2 (positions
+    9-11) of the target:
+        slot2 == EOS_RESIDUAL          → triangle neighbor (no 2nd vertex)
+        slot2 in [0, QUANT_MAX]        → quad neighbor (real 2nd vertex)
+    Only faces that have a real neighbor are counted (slot 1, positions 6-8, is a
+    real vertex, not the EOS 'stop' marker and not padding).
+
+    The metric is the fraction of those faces where the model predicts the correct
+    topology at position 9 (argmax == EOS_RESIDUAL ⇔ triangle).  This is the
+    primary guard-rail for the Option-A fragility: if the model drifts toward
+    emitting EOS in slot 2, quads silently collapse to triangles and this metric
+    drops well before the meshes look obviously wrong.
+
+    Returns a no-op 1.0 when the target layout is not 12-token (e.g. tri-only).
+    """
+    if targets.shape[-1] != 12:
+        return logits.new_tensor(1.0)
+    if faces is not None:
+        targets = targets.clone()
+        targets[~valid_row_mask(faces)] = pad_value
+
+    slot1 = targets[:, :, 6:9]                                   # (B, F, 3)
+    slot2 = targets[:, :, 9:12]
+    has_nb = (slot1 != pad_value).all(-1) & ~(slot1 == EOS_RESIDUAL).any(-1)
+    is_tri_nb  = has_nb & (slot2 == EOS_RESIDUAL).any(-1)
+    is_quad_nb = has_nb & (slot2 >= 0).all(-1) & (slot2 <= QUANT_MAX).all(-1)
+
+    pred_tri = logits[:, :, 9].argmax(-1) == EOS_RESIDUAL        # (B, F)
+    correct  = (pred_tri & is_tri_nb) | (~pred_tri & is_quad_nb)
+
+    n = (is_tri_nb | is_quad_nb).float().sum().clamp(min=1)
+    return correct.float().sum() / n

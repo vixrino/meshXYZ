@@ -27,8 +27,13 @@ class DecoderCfg:
 class MLP(nn.Module):
     """MLP head.
 
-    use_edge_cond=True : takes a query edge (2 verts, 6 coords) and predicts
-                         the 3rd vertex only (3 coords).  Requires n_face_tokens=9.
+    use_edge_cond=True : takes a query edge (2 verts, 6 coords) and predicts the
+                         remaining vertices of the neighbor face.  The edge always
+                         occupies 6 coord slots, so the head predicts
+                         n_face_tokens - 6 coords:
+                           n_face_tokens=9  → 3 (1 new vertex; triangle neighbor)
+                           n_face_tokens=12 → 6 (up to 2 new vertices; quad neighbor,
+                                                 or 1 vertex + EOS marker for a tri).
     use_edge_cond=False: predicts all n_face_tokens coordinate slots of the face.
                          Works for n_face_tokens=9 (triangle) or 12 (unified quad/tri).
     """
@@ -52,7 +57,7 @@ class MLP(nn.Module):
                 nn.Linear(6, d_hidden), nn.GELU(),
                 nn.Linear(d_hidden, d_hidden),
             )
-        n_out = 3 if use_edge_cond else n_face_tokens
+        n_out = (n_face_tokens - 6) if use_edge_cond else n_face_tokens
         self.net = nn.Sequential(
             nn.Linear(d_hidden, d_hidden), nn.GELU(),
             nn.Linear(d_hidden, n_out * vocab_size),
@@ -112,8 +117,8 @@ class MLP(nn.Module):
         """Returns (BN, n_face_tokens, vocab).
 
         When use_edge_cond=True the first 6 positions are zero-padded (the shared
-        edge is not predicted), and only the last 3 positions carry real logits.
-        This assumes n_face_tokens=9; enforced by Decoder.__init__.
+        edge is not predicted); the remaining n_face_tokens-6 positions carry real
+        logits (3 for n_face_tokens=9, 6 for n_face_tokens=12).
         """
         if self.use_edge_cond:
             assert query_edges is not None, (
@@ -128,7 +133,7 @@ class MLP(nn.Module):
                 edge_input = query_edges.float() / (QUANT_MAX + 1)
             fused = fused + self.edge_encoder(edge_input)
 
-        n_coords = 3 if self.use_edge_cond else self.n_face_tokens
+        n_coords = (self.n_face_tokens - 6) if self.use_edge_cond else self.n_face_tokens
         logits = self.net(fused).reshape(-1, n_coords, self.vocab_size)
 
         if self.relative:
@@ -162,10 +167,13 @@ class Decoder(nn.Module):
                 f"got vocab_size={cfg.vocab_size}."
             )
         # use_edge_cond=True pads positions 0-5 (shared edge, 2×3 coords) and predicts
-        # positions 6-8 (new vertex, 3 coords) — assumes exactly 9 token slots total.
-        assert not (cfg.use_edge_cond and cfg.n_face_tokens != 9), (
-            "use_edge_cond=True assumes n_face_tokens=9 (6 edge pad + 3 predicted). "
-            "Set use_edge_cond=False when using n_face_tokens=12."
+        # the remaining slots: 3 for n_face_tokens=9 (1 new vertex of a triangle
+        # neighbor) or 6 for n_face_tokens=12 (up to 2 new vertices of a quad
+        # neighbor; a triangle neighbor uses 1 vertex + an EOS marker in slot 2).
+        assert not (cfg.use_edge_cond and cfg.n_face_tokens not in (9, 12)), (
+            "use_edge_cond=True supports n_face_tokens=9 (6 edge pad + 3 predicted) "
+            "or 12 (6 edge pad + 6 predicted). "
+            f"Got n_face_tokens={cfg.n_face_tokens}."
         )
 
         self.latent_proj = nn.Linear(cfg.d_latent, cfg.d_hidden)

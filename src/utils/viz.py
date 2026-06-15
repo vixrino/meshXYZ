@@ -343,6 +343,52 @@ def _reconstruct_faces(
     return pred_faces, gt_faces
 
 
+def _canonical_face_12_np(face12: np.ndarray) -> np.ndarray:
+    """Numpy mirror of geometry.canonical_face_12 (rotation only, no flip)."""
+    face12 = np.asarray(face12)
+    if face12[0] > 127:                                   # triangle (TRI_PAD prefix)
+        coords  = np.clip(face12[3:], 0, 127).reshape(3, 3)
+        keys    = [(int(v[2]), int(v[1]), int(v[0])) for v in coords]
+        rotated = np.roll(coords, -keys.index(min(keys)), axis=0).reshape(9)
+        return np.concatenate([np.full(3, _TRI_PAD), rotated])
+    coords = np.clip(face12, 0, 127).reshape(4, 3)
+    keys   = [(int(v[2]), int(v[1]), int(v[0])) for v in coords]
+    return np.roll(coords, -keys.index(min(keys)), axis=0).reshape(12)
+
+
+def _reconstruct_faces_12(
+    raw_preds: np.ndarray,    # (N, 12) argmax; positions 6-8 = v1, 9-11 = v2
+    raw_gt: np.ndarray,       # (N, 12) targets; 6-8 = v1/EOS(stop), 9-11 = v2/EOS(tri)/PAD
+    query_edges: np.ndarray,  # (N, 6) ev0, ev1
+) -> tuple[np.ndarray, np.ndarray]:
+    """12-token edge-cond reconstruction for viz, mirroring generate()'s Option-A
+    hierarchy (stop / triangle / quad)."""
+    N = query_edges.shape[0]
+    pred_faces = np.zeros((N, 12), dtype=raw_preds.dtype)
+    gt_faces   = raw_gt.copy()
+
+    for i in range(N):
+        gt_v1, gt_v2 = raw_gt[i, 6:9], raw_gt[i, 9:12]
+        if (gt_v1 == EOS_RESIDUAL).any():                 # stop face → mark pred EOS too
+            pred_faces[i, 6:9] = EOS_RESIDUAL
+            continue
+        ev0, ev1 = query_edges[i, :3], query_edges[i, 3:]
+        if (gt_v2 == EOS_RESIDUAL).any():                 # triangle neighbor
+            gt_faces[i] = _canonical_face_12_np(np.concatenate([np.full(3, _TRI_PAD), ev0, ev1, gt_v1]))
+        else:                                              # quad neighbor
+            gt_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, gt_v1, gt_v2]))
+
+        pv1, pv2 = raw_preds[i, 6:9], raw_preds[i, 9:12]
+        if (pv1 == EOS_RESIDUAL).any():
+            pred_faces[i, 6:9] = EOS_RESIDUAL
+        elif (pv2 == EOS_RESIDUAL).any():
+            pred_faces[i] = _canonical_face_12_np(np.concatenate([np.full(3, _TRI_PAD), ev0, ev1, np.clip(pv1, 0, 127)]))
+        else:
+            pred_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, np.clip(pv1, 0, 127), np.clip(pv2, 0, 127)]))
+
+    return pred_faces, gt_faces
+
+
 def _render_all(
     preds: np.ndarray,
     tgts: np.ndarray,
@@ -414,10 +460,13 @@ def save_prediction_grid(
         return
 
     if query_edges is not None:
-        # edge_cond mode (triangle-only): positions 0-5 of preds/gt are dummy —
-        # reconstruct full canonical (N, 9) faces.
+        # edge_cond mode: positions 0-5 of preds/gt are dummy — reconstruct full
+        # canonical faces (9-token triangle-only, or 12-token unified quad/tri).
         qe = query_edges[0].cpu().numpy()   # (N, 6)
-        preds, gt_tgts = _reconstruct_faces(raw_preds, raw_gt, qe)
+        if raw_gt.shape[-1] == 12:
+            preds, gt_tgts = _reconstruct_faces_12(raw_preds, raw_gt, qe)
+        else:
+            preds, gt_tgts = _reconstruct_faces(raw_preds, raw_gt, qe)
     else:
         preds, gt_tgts = raw_preds, raw_gt
 

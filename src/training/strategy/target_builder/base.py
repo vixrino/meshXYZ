@@ -17,14 +17,16 @@ class BaseTargetBuilder(ABC):
         batch: "Batch",
         target_mask: Bool[Tensor, "batch query_faces key_faces"],
         use_edge_cond: bool = True,
-    ) -> "tuple[Int[Tensor, 'batch faces 9'], Int[Tensor, 'batch faces 6'] | None]":
-        """Return (targets_9, query_edges).
+    ) -> "tuple[Int[Tensor, 'batch faces T'], Int[Tensor, 'batch faces 6'] | None]":
+        """Return (targets, query_edges).  T is 9 (triangle-only) or 12 (unified).
 
         use_edge_cond=True:
-            targets_9[..., :6] = PAD_TARGET  (edge positions, excluded from loss)
-            targets_9[..., 6:] = new-vertex absolute coords (or EOS_RESIDUAL when no target)
+            targets[..., :6]   = PAD_TARGET  (edge positions, excluded from loss)
+            9-token : targets[..., 6:9]  = new-vertex coords (or EOS_RESIDUAL = no target)
+            12-token: targets[..., 6:9]  = v1 (or EOS_RESIDUAL = stop edge)
+                      targets[..., 9:12] = v2 (quad) / EOS_RESIDUAL (triangle) / PAD
             query_edges        = (B, N, 6) two-vertex edge being extended
         use_edge_cond=False:
-            targets_9          = full canonical 9-coord face (original behaviour)
+            targets            = full canonical T-coord face (original behaviour)
             query_edges        = None
         """

@@ -8,7 +8,7 @@ from lightning.pytorch.loggers import WandbLogger
 from ..dataset.types import Batch
 from ..model.mesh_transformer import MeshTransformer, MeshTransformerCfg
 from .config import TrainingCfg
-from .loss import compute_metrics, decompose_loss, face_type_acc, reconstruction_loss, valid_row_mask
+from .loss import compute_metrics, decompose_loss, edge_face_type_acc, face_type_acc, reconstruction_loss, valid_row_mask
 from .optimizer import build_optimizer
 from .strategy import MaskingPipeline, OrderingPipeline, TargetBuilder
 from ..utils.viz import save_generation_video, save_prediction_grid
@@ -50,9 +50,18 @@ class MeshTransformerModule(LightningModule):
 
         # Phase-4 metrics: loss components + face-type accuracy
         decomposed    = decompose_loss(logits, targets, faces=batch["faces"])
-        ftype_acc     = face_type_acc(logits, targets, faces=batch["faces"])
         self.log_dict({f"train/{k}": v for k, v in decomposed.items()}, prog_bar=False, on_step=True, on_epoch=False)
-        self.log("train/face_type_acc", ftype_acc, prog_bar=False, on_step=True, on_epoch=False)
+        if use_edge_cond:
+            # In edge-cond the topology signal lives in slot 2 (EOS ⇒ triangle),
+            # so face_type_acc (which reads target position 0) does not apply.
+            # edge_face_type_acc is the Option-A tri/quad guard-rail.
+            self.log("train/edge_face_type_acc",
+                     edge_face_type_acc(logits, targets, faces=batch["faces"]),
+                     prog_bar=False, on_step=True, on_epoch=False)
+        else:
+            self.log("train/face_type_acc",
+                     face_type_acc(logits, targets, faces=batch["faces"]),
+                     prog_bar=False, on_step=True, on_epoch=False)
 
         return loss
 

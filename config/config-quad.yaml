@@ -13,7 +13,7 @@ decoder:
   use_pos_embed: false
   use_spherical_embed: true   # adapted for the 12-token unified block (quad + TRI_PAD-prefixed tri)
   relative: true           # 12-token: anchor on the real v0 (TRI_PAD-aware) + raw logits at the TRI_PAD prefix
-  use_edge_cond: false     # AdjacentTargetBuilder assumes 3 edges/face; disabled for quads
+  use_edge_cond: true      # 12-token: 6 edge pad + 6 predicted (quad=2 verts; tri=1 vert + EOS marker)
 
 data:
   num_points: 2048
@@ -41,7 +41,7 @@ training:
     - type: causal
       prob: 1.0
   target_builder:
-    type: causal             # AdjacentTargetBuilder is tri-specific; causal is topology-agnostic
+    type: adjacent           # edge-cond requires query_edges → AdjacentTargetBuilder (12-token aware)
   ordering:
     strategies:
       - type: random

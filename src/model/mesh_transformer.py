@@ -8,7 +8,7 @@ from torch import Tensor
 
 from .decoder import Decoder, DecoderCfg
 from .encoder import ENCODER_ARCH, EncoderCfg, KLAutoEncoder
-from ..constants import EOS_COORD, EOS_RESIDUAL, QUANT_MAX
+from ..constants import EOS_COORD, EOS_RESIDUAL, QUANT_MAX, TRI_PAD
 from ..utils.geometry import canonical_face, canonical_face_12
 
 
@@ -174,24 +174,49 @@ class MeshTransformer(nn.Module):
                     query_edges_t[0, query_idx] = torch.cat([ev0, ev1])
 
                     logits = self.decoder(latent, curr_faces.unsqueeze(0), token_mask=None, query_edges=query_edges_t)
-                    coord_logits = logits[0, query_idx, 6:]          # (3, vocab)
-                    pred_v2 = coord_logits.argmax(-1)                 # (3,)
+                    coord_logits = logits[0, query_idx, 6:]          # (n_face_tokens-6, vocab)
+                    pred = coord_logits.argmax(-1)                    # (3 or 6,)
 
-                    if (pred_v2 == EOS_RESIDUAL).any():
-                        eos_count += 1
-                        eos_edges.add(edge_key)
-                        continue
+                    if n_face_tokens == 9:
+                        if (pred == EOS_RESIDUAL).any():             # no neighbor → stop edge
+                            eos_count += 1
+                            eos_edges.add(edge_key)
+                            continue
+                        new_face = canonical_face(torch.stack([ev0, ev1, pred.clamp(0, QUANT_MAX)]))
+                        conf_coords, conf_pred = coord_logits, pred
+                    else:
+                        # 12-token unified, Option-A hierarchical EOS.
+                        v1, v2 = pred[0:3], pred[3:6]
+                        if (v1 == EOS_RESIDUAL).any():               # slot 1 EOS → stop edge
+                            eos_count += 1
+                            eos_edges.add(edge_key)
+                            continue
+                        if (v2 == EOS_RESIDUAL).any():               # slot 2 EOS → triangle neighbor
+                            tri = torch.stack([ev0, ev1, v1.clamp(0, QUANT_MAX)]).reshape(9)
+                            pad = curr_faces.new_full((3,), TRI_PAD)
+                            new_face = canonical_face_12(torch.cat([pad, tri]))
+                            conf_coords, conf_pred = coord_logits[0:3], v1
+                        else:                                         # quad neighbor (2 new verts)
+                            quad = torch.stack(
+                                [ev0, ev1, v1.clamp(0, QUANT_MAX), v2.clamp(0, QUANT_MAX)]
+                            ).reshape(12)
+                            new_face = canonical_face_12(quad)
+                            conf_coords, conf_pred = coord_logits, pred
 
-                    new_face = canonical_face(torch.stack([ev0, ev1, pred_v2.clamp(0, QUANT_MAX)]))
                     face_key = tuple(new_face.tolist())
 
                     if face_key in face_set:
                         visited_edges.add(edge_key)
                         continue
 
-                    probs = coord_logits.softmax(-1)
-                    argmax_probs = probs[torch.arange(3), pred_v2]
-                    step_probs.append(argmax_probs.cpu().numpy())
+                    probs = conf_coords.softmax(-1)
+                    argmax_probs = probs[torch.arange(conf_coords.shape[0]), conf_pred]
+                    # step_probs is stacked across steps → pad to a fixed width
+                    # (n_face_tokens-6: 3 for tri-only, 6 for unified) so a triangle
+                    # face in 12-token mode (3 confidences) aligns with quad rows.
+                    sp = np.ones(n_face_tokens - 6, dtype=np.float32)
+                    sp[:argmax_probs.shape[0]] = argmax_probs.cpu().numpy()
+                    step_probs.append(sp)
 
                     # low-confidence: re-queue at the back, or drop after 2 skips
                     if argmax_probs.min().item() < confidence_threshold:
@@ -258,7 +283,7 @@ class MeshTransformer(nn.Module):
             if return_intermediates:
                 all_intermediates.append(intermediates)
                 all_eos_snapshots.append(eos_snapshots)
-                n_step = 3 if use_edge_cond else n_face_tokens
+                n_step = (n_face_tokens - 6) if use_edge_cond else n_face_tokens
                 all_step_probs.append(np.stack(step_probs) if step_probs else np.empty((0, n_step)))
                 all_boundary_snapshots.append(boundary_snapshots)
                 all_query_snapshots.append(query_snapshots)
