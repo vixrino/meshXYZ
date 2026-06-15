@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from ..constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_PAD
+from ..constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_NEIGHBOR, TRI_PAD
 
 
 def valid_row_mask(
@@ -126,13 +126,19 @@ def decompose_loss(
 ) -> dict[str, "Float[Tensor, '']"]:
     """Split reconstruction_loss into three disjoint components by target token value.
 
-    Decomposition (ranges are disjoint because TRI_PAD=129 > QUANT_MAX=127 and
-    EOS_RESIDUAL=255 > TRI_PAD, so the three masks never overlap):
+    Decomposition (ranges are disjoint: TRI_PAD=129 > QUANT_MAX=127,
+    EOS_RESIDUAL=255 and TRI_NEIGHBOR=256 are both > TRI_PAD, and all four masks
+    are mutually exclusive):
 
         target == TRI_PAD (129)          → loss_tri_pad   (positions 0-2 of tri-target faces)
         target in [0, QUANT_MAX] (0-127) → loss_coord     (coord slots of both tri and quad faces)
-        target == EOS_RESIDUAL (255)     → loss_eos       (faces without a next neighbor)
+        target == EOS_RESIDUAL (255)     → loss_eos       (slot-1 STOP: edge has no neighbor)
+        target == TRI_NEIGHBOR (256)     → loss_tri_nbr   (slot-2 marker: neighbor is a triangle)
         target == PAD_TARGET (-1)        → ignored        (collate padding rows or masked positions)
+
+    loss_eos and loss_tri_nbr are intentionally separate (distinct sentinels): a
+    rising loss_tri_nbr is the direct signal that the model is failing to mark
+    triangle neighbors and collapsing quads — the failure the token split fixes.
 
     Weighted by their token counts, the three components sum to reconstruction_loss.
     Each component uses mean-over-valid-tokens reduction, so the values are
@@ -164,6 +170,7 @@ def decompose_loss(
         "loss_tri_pad": _ce(tgt_flat == TRI_PAD),
         "loss_coord":   _ce((tgt_flat >= 0) & (tgt_flat <= QUANT_MAX)),
         "loss_eos":     _ce(tgt_flat == EOS_RESIDUAL),
+        "loss_tri_nbr": _ce(tgt_flat == TRI_NEIGHBOR),
     }
 
 
@@ -216,16 +223,19 @@ def edge_face_type_acc(
 
     In edge-cond mode the neighbor topology is signalled by slot 2 (positions
     9-11) of the target:
-        slot2 == EOS_RESIDUAL          → triangle neighbor (no 2nd vertex)
+        slot2 == TRI_NEIGHBOR (256)    → triangle neighbor (no 2nd vertex)
         slot2 in [0, QUANT_MAX]        → quad neighbor (real 2nd vertex)
     Only faces that have a real neighbor are counted (slot 1, positions 6-8, is a
-    real vertex, not the EOS 'stop' marker and not padding).
+    real vertex, not the EOS_RESIDUAL 'STOP' marker and not padding).
+
+    Note slot 1 STOP (EOS_RESIDUAL) and slot 2 TRI_NEIGHBOR are distinct tokens,
+    so a triangle neighbor is detected by TRI_NEIGHBOR — never by EOS_RESIDUAL.
 
     The metric is the fraction of those faces where the model predicts the correct
-    topology at position 9 (argmax == EOS_RESIDUAL ⇔ triangle).  This is the
+    topology at position 9 (argmax == TRI_NEIGHBOR ⇔ triangle).  This is the
     primary guard-rail for the Option-A fragility: if the model drifts toward
-    emitting EOS in slot 2, quads silently collapse to triangles and this metric
-    drops well before the meshes look obviously wrong.
+    emitting the triangle marker in slot 2, quads silently collapse to triangles
+    and this metric drops well before the meshes look obviously wrong.
 
     Returns a no-op 1.0 when the target layout is not 12-token (e.g. tri-only).
     """
@@ -238,11 +248,58 @@ def edge_face_type_acc(
     slot1 = targets[:, :, 6:9]                                   # (B, F, 3)
     slot2 = targets[:, :, 9:12]
     has_nb = (slot1 != pad_value).all(-1) & ~(slot1 == EOS_RESIDUAL).any(-1)
-    is_tri_nb  = has_nb & (slot2 == EOS_RESIDUAL).any(-1)
+    is_tri_nb  = has_nb & (slot2 == TRI_NEIGHBOR).any(-1)
     is_quad_nb = has_nb & (slot2 >= 0).all(-1) & (slot2 <= QUANT_MAX).all(-1)
 
-    pred_tri = logits[:, :, 9].argmax(-1) == EOS_RESIDUAL        # (B, F)
+    pred_tri = logits[:, :, 9].argmax(-1) == TRI_NEIGHBOR        # (B, F)
     correct  = (pred_tri & is_tri_nb) | (~pred_tri & is_quad_nb)
 
     n = (is_tri_nb | is_quad_nb).float().sum().clamp(min=1)
     return correct.float().sum() / n
+
+
+def edge_face_type_recall(
+    logits: Float[Tensor, "batch faces n_face_tokens vocab"],
+    targets: Int[Tensor, "batch faces n_face_tokens"],
+    faces: "Int[Tensor, 'batch faces n_face_tokens'] | None" = None,
+    pad_value: int = PAD_TARGET,
+) -> "dict[str, Float[Tensor, '']]":
+    """Per-class breakdown of edge_face_type_acc (diagnostic, no behaviour change).
+
+    Kept ALONGSIDE edge_face_type_acc so a drop can be attributed to the right
+    failure mode and the token-split fix can be verified (quad_recall should climb
+    back to ~1.0 once slot-2 TRI_NEIGHBOR no longer competes with the slot-1 STOP):
+
+        tri_recall  : among triangle neighbours (slot2 == TRI_NEIGHBOR), fraction
+                      the model predicts as triangle (argmax position 9 == TRI_NEIGHBOR).
+        quad_recall : among quad neighbours (slot2 == real coord), fraction the
+                      model predicts as quad (argmax position 9 != TRI_NEIGHBOR).
+        perc_tri_nb : fraction of typed neighbours that are triangles — the live
+                      class balance (tiny on native-quad meshes ⇒ tri_recall is
+                      high-variance).
+
+    Returns a no-op (1.0 / 1.0 / 0.0) for non-12-token layouts.
+    """
+    if targets.shape[-1] != 12:
+        one, zero = logits.new_tensor(1.0), logits.new_tensor(0.0)
+        return {"tri_recall": one, "quad_recall": one, "perc_tri_nb": zero}
+    if faces is not None:
+        targets = targets.clone()
+        targets[~valid_row_mask(faces)] = pad_value
+
+    slot1 = targets[:, :, 6:9]
+    slot2 = targets[:, :, 9:12]
+    has_nb = (slot1 != pad_value).all(-1) & ~(slot1 == EOS_RESIDUAL).any(-1)
+    is_tri_nb  = has_nb & (slot2 == TRI_NEIGHBOR).any(-1)
+    is_quad_nb = has_nb & (slot2 >= 0).all(-1) & (slot2 <= QUANT_MAX).all(-1)
+
+    pred_tri = logits[:, :, 9].argmax(-1) == TRI_NEIGHBOR
+
+    n_tri  = is_tri_nb.float().sum()
+    n_quad = is_quad_nb.float().sum()
+    n_typed = (n_tri + n_quad).clamp(min=1)
+
+    tri_recall  = (pred_tri & is_tri_nb).float().sum()  / n_tri.clamp(min=1)
+    quad_recall = (~pred_tri & is_quad_nb).float().sum() / n_quad.clamp(min=1)
+    perc_tri_nb = n_tri / n_typed
+    return {"tri_recall": tri_recall, "quad_recall": quad_recall, "perc_tri_nb": perc_tri_nb}

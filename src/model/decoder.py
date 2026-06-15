@@ -5,7 +5,7 @@ import torch.nn as nn
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from ..constants import EOS_RESIDUAL, QUANT_MAX, TRI_PAD
+from ..constants import EOS_RESIDUAL, QUANT_MAX, TRI_NEIGHBOR, TRI_PAD
 from ..utils.geometry import face_cartesian_to_spherical
 
 
@@ -161,10 +161,13 @@ class Decoder(nn.Module):
         # instead of being remapped into the residual dead-zone.  All it requires is
         # a vocab large enough to hold the TRI_PAD and EOS_RESIDUAL classes.
         if cfg.relative and cfg.n_face_tokens == 12:
-            assert cfg.vocab_size > EOS_RESIDUAL, (
-                "relative=True with n_face_tokens=12 needs vocab_size > EOS_RESIDUAL "
-                f"({EOS_RESIDUAL}) so TRI_PAD/EOS classes are representable; "
-                f"got vocab_size={cfg.vocab_size}."
+            # Highest target class in 12-token edge-cond mode is TRI_NEIGHBOR (256),
+            # the slot-2 triangle marker (distinct from the slot-1 STOP=EOS_RESIDUAL).
+            # vocab_size=257 already covers it (index 256), so no output-dim change.
+            assert cfg.vocab_size > TRI_NEIGHBOR, (
+                "relative=True with n_face_tokens=12 needs vocab_size > TRI_NEIGHBOR "
+                f"({TRI_NEIGHBOR}) so TRI_PAD/EOS_RESIDUAL/TRI_NEIGHBOR classes are "
+                f"representable; got vocab_size={cfg.vocab_size}."
             )
         # use_edge_cond=True pads positions 0-5 (shared edge, 2×3 coords) and predicts
         # the remaining slots: 3 for n_face_tokens=9 (1 new vertex of a triangle

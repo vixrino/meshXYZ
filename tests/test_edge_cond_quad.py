@@ -16,9 +16,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_PAD
+from src.constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_NEIGHBOR, TRI_PAD
 from src.model.decoder import MLP, Decoder, DecoderCfg
-from src.training.loss import edge_face_type_acc
+from src.training.loss import edge_face_type_acc, edge_face_type_recall
 from src.training.strategy.target_builder.adjacent import (
     AdjacentTargetBuilder,
     AdjacentTargetBuilderCfg,
@@ -68,7 +68,9 @@ def test_triangle_neighbor_target():
     tgt, _ = _builder().compute_targets(_batch(faces, neighbors), _mask(2, [(0, 1)]))
 
     assert tgt[0, 0, 6:9].tolist()  == E                          # single unique vertex
-    assert tgt[0, 0, 9:12].tolist() == [EOS_RESIDUAL] * 3         # "no 2nd vertex" marker
+    # slot-2 "triangle neighbor" marker — distinct from the slot-1 STOP (EOS_RESIDUAL).
+    assert tgt[0, 0, 9:12].tolist() == [TRI_NEIGHBOR] * 3
+    assert (tgt[0, 0, 9:12] != EOS_RESIDUAL).all()               # never the STOP token
 
 
 def test_no_neighbor_is_stop_eos():
@@ -110,6 +112,9 @@ def test_9token_path_unchanged():
     assert qe[0, 0].tolist() == Q + R                            # lex-sorted edge
     assert tgt[0, 0, 0:6].tolist() == [PAD_TARGET] * 6
     assert tgt[0, 0, 6:9].tolist() == S                         # the unique vertex
+    # Retro-compat: TRI_NEIGHBOR is a 12-token-only sentinel; it must never appear
+    # anywhere in the 9-token triangle path.
+    assert (tgt != TRI_NEIGHBOR).all()
 
 
 # ─────────────────────────── MLP / Decoder shapes ────────────────────────────
@@ -152,21 +157,27 @@ def test_edge_cond_guard_rejects_bad_token_count():
 def test_edge_face_type_acc_perfect_classification():
     vocab = 257
     targets = torch.full((1, 2, 12), PAD_TARGET, dtype=torch.long)
-    # face0 = quad neighbor (slot2 real coords); face1 = triangle neighbor (slot2 EOS)
+    # face0 = quad neighbor (slot2 real coords); face1 = triangle neighbor (slot2 TRI_NEIGHBOR)
     targets[0, 0, 6:9]  = torch.tensor([5, 6, 7])
     targets[0, 0, 9:12] = torch.tensor([8, 9, 10])
     targets[0, 1, 6:9]  = torch.tensor([11, 12, 13])
-    targets[0, 1, 9:12] = EOS_RESIDUAL
+    targets[0, 1, 9:12] = TRI_NEIGHBOR
 
     logits = torch.full((1, 2, 12, vocab), -10.0)
-    logits[0, 0, 9, 5] = 10.0                # quad: pos9 argmax = coord (not EOS)
-    logits[0, 1, 9, EOS_RESIDUAL] = 10.0     # tri: pos9 argmax = EOS
+    logits[0, 0, 9, 5] = 10.0                  # quad: pos9 argmax = coord (not TRI_NEIGHBOR)
+    logits[0, 1, 9, TRI_NEIGHBOR] = 10.0       # tri:  pos9 argmax = TRI_NEIGHBOR
     assert torch.isclose(edge_face_type_acc(logits, targets), torch.tensor(1.0))
 
-    # flip the quad prediction to EOS → misclassified → 0.5
+    # flip the quad prediction to TRI_NEIGHBOR → quad collapses to triangle → 0.5
     logits[0, 0, 9, 5] = -10.0
-    logits[0, 0, 9, EOS_RESIDUAL] = 10.0
+    logits[0, 0, 9, TRI_NEIGHBOR] = 10.0
     assert torch.isclose(edge_face_type_acc(logits, targets), torch.tensor(0.5))
+
+    # the recall split must localise it: quad_recall→0, tri_recall→1
+    rec = edge_face_type_recall(logits, targets)
+    assert torch.isclose(rec["quad_recall"], torch.tensor(0.0))
+    assert torch.isclose(rec["tri_recall"],  torch.tensor(1.0))
+    assert torch.isclose(rec["perc_tri_nb"], torch.tensor(0.5))
 
 
 def test_edge_face_type_acc_noop_on_9token():

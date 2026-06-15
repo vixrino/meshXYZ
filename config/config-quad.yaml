@@ -8,7 +8,10 @@ decoder:
   n_layers: 12
   n_heads: 6
   max_faces: 2048
-  vocab_size: 257          # 256 + 1 for TRI_PAD=129
+  vocab_size: 257          # covers coords 0-127, TRI_PAD=129, EOS_RESIDUAL=255 (slot-1 STOP),
+                            # and TRI_NEIGHBOR=256 (slot-2 triangle marker). Index 256 was the
+                            # previously-unused slot, so no output-dim change vs the shared-token
+                            # version — existing checkpoints stay loadable.
   n_face_tokens: 12        # unified 12-token block (3 TRI_PAD + 9 coords for tri; 12 coords for quad)
   use_pos_embed: false
   use_spherical_embed: true   # adapted for the 12-token unified block (quad + TRI_PAD-prefixed tri)

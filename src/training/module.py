@@ -8,7 +8,7 @@ from lightning.pytorch.loggers import WandbLogger
 from ..dataset.types import Batch
 from ..model.mesh_transformer import MeshTransformer, MeshTransformerCfg
 from .config import TrainingCfg
-from .loss import compute_metrics, decompose_loss, edge_face_type_acc, face_type_acc, reconstruction_loss, valid_row_mask
+from .loss import compute_metrics, decompose_loss, edge_face_type_acc, edge_face_type_recall, face_type_acc, reconstruction_loss, valid_row_mask
 from .optimizer import build_optimizer
 from .strategy import MaskingPipeline, OrderingPipeline, TargetBuilder
 from ..utils.viz import save_generation_video, save_prediction_grid
@@ -58,6 +58,11 @@ class MeshTransformerModule(LightningModule):
             self.log("train/edge_face_type_acc",
                      edge_face_type_acc(logits, targets, faces=batch["faces"]),
                      prog_bar=False, on_step=True, on_epoch=False)
+            # Per-class split kept alongside the aggregate: quad_recall climbing
+            # back to ~1.0 is the proof the slot-1/slot-2 token split worked.
+            recalls = edge_face_type_recall(logits, targets, faces=batch["faces"])
+            self.log_dict({f"train/{k}": v for k, v in recalls.items()},
+                          prog_bar=False, on_step=True, on_epoch=False)
         else:
             self.log("train/face_type_acc",
                      face_type_acc(logits, targets, faces=batch["faces"]),
