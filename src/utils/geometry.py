@@ -1,7 +1,7 @@
 import math
 
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from ..constants import QUANT_MAX, TRI_PAD
@@ -9,7 +9,10 @@ from ..constants import QUANT_MAX, TRI_PAD
 _SQRT3 = math.sqrt(3)
 
 
-def face_cartesian_to_spherical(face_norm: Float[Tensor, "... C"]) -> Float[Tensor, "... C"]:
+def face_cartesian_to_spherical(
+    face_norm: Float[Tensor, "... C"],
+    is_tri: "Bool[Tensor, '...'] | None" = None,
+) -> Float[Tensor, "... C"]:
     """Spherical embedding of a normalized face, preserving the channel count.
 
     The vertex anchor v0 is kept absolute; every other vertex is encoded as the
@@ -23,9 +26,7 @@ def face_cartesian_to_spherical(face_norm: Float[Tensor, "... C"]) -> Float[Tens
         input  [v0, v1, v2]
         output [v0, sph(v1-v0), sph(v2-v0)]
 
-    C == 12 — unified quad/tri block.  Face type is read from position 0
-        (TRI_PAD prefix → triangle, real coord → quad), matching the oracle used
-        by canonical_face_12 and build_edge_adjacency_unified:
+    C == 12 — unified quad/tri block:
 
         quad     input  [v0, v1, v2, v3]
                  output [v0, sph(v1-v0), sph(v2-v0), sph(v3-v0)]
@@ -36,6 +37,18 @@ def face_cartesian_to_spherical(face_norm: Float[Tensor, "... C"]) -> Float[Tens
         The TRI_PAD prefix is passed through untouched so the face-type signal
         survives, and positions 3-11 are bit-identical to the C==9 result for the
         same triangle.
+
+    Face-type detection (C == 12 only)
+        is_tri : optional bool tensor with the same leading shape as face_norm
+        (face_norm.shape[:-1]).  True marks a triangle row.  Pass it from the
+        caller computed on the RAW integer tokens (face_input[..., 0] == TRI_PAD)
+        so detection is an exact integer comparison, never a float threshold.
+
+        When is_tri is None a threshold fallback (face_norm[..., 0] > 1.0) is used.
+        That is only safe because real coords ≤ 127/128 = 0.992, EOS_COORD =
+        128/128 = 1.0 and TRI_PAD = 129/128 = 1.0078 are all exactly representable;
+        the explicit mask is preferred in production to avoid boundary fragility
+        (EOS_COORD padding rows land exactly on 1.0).
     """
 
     def to_spherical(d: Tensor) -> Tensor:
@@ -58,10 +71,12 @@ def face_cartesian_to_spherical(face_norm: Float[Tensor, "... C"]) -> Float[Tens
         return torch.cat([v0, to_spherical(v1 - v0), to_spherical(v2 - v0)], dim=-1)
 
     if C == 12:
-        # Face-type oracle: position 0.  Real coords normalize to <= QUANT_MAX/128
-        # (= 0.992); TRI_PAD normalizes to 129/128 = 1.0078.  A threshold of 1.0
-        # separates them cleanly and is robust to float rounding of a real coord.
-        is_tri = face_norm[..., 0:1] > 1.0   # (..., 1) bool
+        # Prefer the caller-supplied exact mask; fall back to the float threshold
+        # only when no mask is given (standalone / test convenience).
+        if is_tri is not None:
+            is_tri_col = is_tri.unsqueeze(-1)      # (..., 1) bool
+        else:
+            is_tri_col = face_norm[..., 0:1] > 1.0
 
         # Quad interpretation: vertices at 0-2 / 3-5 / 6-8 / 9-11.
         q_v0 = face_norm[..., 0:3]
@@ -82,7 +97,7 @@ def face_cartesian_to_spherical(face_norm: Float[Tensor, "... C"]) -> Float[Tens
             to_spherical(face_norm[..., 9:12] - t_v0),
         ], dim=-1)
 
-        return torch.where(is_tri, tri_out, quad_out)
+        return torch.where(is_tri_col, tri_out, quad_out)
 
     raise ValueError(
         f"face_cartesian_to_spherical: expected last dim 9 or 12, got {C}."

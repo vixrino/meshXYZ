@@ -5,7 +5,7 @@ import torch.nn as nn
 from jaxtyping import Float, Int
 from torch import Tensor
 
-from ..constants import QUANT_MAX
+from ..constants import QUANT_MAX, TRI_PAD
 from ..utils.geometry import face_cartesian_to_spherical
 
 
@@ -187,7 +187,12 @@ class Decoder(nn.Module):
         # linear layer can distinguish pad positions from real coordinates.
         f = face_input.to(dtype=dtype) / (QUANT_MAX + 1)
         if self.cfg.use_spherical_embed:
-            f = face_cartesian_to_spherical(f)
+            # Detect the triangle prefix on the RAW integer tokens (exact
+            # == TRI_PAD), not on the normalized float, so face-type detection
+            # never depends on a float threshold.  Only meaningful for the
+            # 12-token unified layout; 9-token tri-only passes is_tri=None.
+            is_tri = face_input[..., 0] == TRI_PAD if face_input.shape[-1] == 12 else None
+            f = face_cartesian_to_spherical(f, is_tri=is_tri)
         emb = self.face_embed(f)
         if self.cfg.use_pos_embed:
             emb = emb + self.pos_embed(torch.arange(N, device=face_input.device))

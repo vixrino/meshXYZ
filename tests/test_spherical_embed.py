@@ -104,6 +104,39 @@ def test_mixed_batch_tri_and_quad():
     assert torch.allclose(out[1], face_cartesian_to_spherical(_norm(quad)))
 
 
+def test_explicit_mask_matches_threshold_on_real_data():
+    """For real data, the explicit is_tri mask gives the same result as the fallback."""
+    tri12 = [TRI_PAD, TRI_PAD, TRI_PAD, 10, 20, 30, 10, 20, 90, 10, 80, 90]
+    quad  = [10, 20, 30, 10, 20, 90, 10, 80, 90, 10, 80, 30]
+    batch = _norm([tri12, quad])                 # (2, 12)
+
+    mask = torch.tensor([True, False])           # exact mask from raw tokens
+    out_mask      = face_cartesian_to_spherical(batch, is_tri=mask)
+    out_threshold = face_cartesian_to_spherical(batch)   # fallback path
+
+    assert torch.allclose(out_mask, out_threshold)
+
+
+def test_mask_takes_precedence_over_values():
+    """The mask overrides the value-based heuristic: an all-coord row forced to
+    is_tri=True must be encoded with the triangle interpretation, proving the
+    function relies on the mask rather than the float threshold."""
+    all_coords = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]
+    vec = _norm(all_coords)
+
+    forced_tri  = face_cartesian_to_spherical(vec, is_tri=torch.tensor(True))
+    forced_quad = face_cartesian_to_spherical(vec, is_tri=torch.tensor(False))
+
+    # Triangle interpretation preserves positions 0-2 as the raw prefix and applies
+    # the 9-coord transform to positions 3-11; quad interpretation uses pos 0-2 as v0.
+    assert torch.allclose(forced_tri[0:3], vec[0:3])      # prefix preserved
+    assert torch.allclose(forced_tri[3:6], vec[3:6])      # t_v0 anchor
+    # The two interpretations must differ (mask actually changes the encoding).
+    assert not torch.allclose(forced_tri, forced_quad)
+    # forced_tri spherical part equals the pure 9-coord result of tokens 3-11.
+    assert torch.allclose(forced_tri[3:12], face_cartesian_to_spherical(vec[3:12]))
+
+
 def test_unsupported_channel_count_raises():
     with pytest.raises(ValueError):
         face_cartesian_to_spherical(torch.zeros(6, dtype=torch.float64))
