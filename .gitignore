@@ -224,4 +224,6 @@ wandb/
 *.ckpt
 .DS_Store
 encoder_weights/
-data/
+# Ignore downloaded datasets, but keep the small native-quad reference meshes.
+data/*
+!data/quad_refs/
