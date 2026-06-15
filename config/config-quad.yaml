@@ -34,8 +34,12 @@ training:
   viz_every_n_steps: 2000
   gen_max_ctx: 50           # number of context faces fed to generate() during viz
   gen_max_steps: 200        # max new faces to generate during viz (quad = up to 200 faces)
-  eos_weight: 10            # upweight rare EOS_RESIDUAL class (default 1.0); 10 = cautious first test
-                            # watch train/gen_final_faces: if it collapses to 1-5, eos_weight too high
+  eos_weight: 1.0           # MUST stay ~1.0 in edge-cond: EOS is no longer rare here
+                            # (every boundary/stop edge + every triangle's slot-2 marker →
+                            # perc_eos ≈ 0.2-0.3, vs ~0.0006 in causal mode). Upweighting it
+                            # (e.g. 10) makes the model collapse to predicting EOS everywhere
+                            # (coord_acc→0, edge_face_type_acc→tri-fraction). eos_weight>1 only
+                            # made sense for the causal regime where EOS was <0.1% of tokens.
   mixed_precision: true
   masking:
     - type: causal
