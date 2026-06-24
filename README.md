@@ -123,18 +123,18 @@ mesh counts, plus the global face-level tri/quad fraction).
 |---|---|---|
 | `QUANT_MAX` | 127 | Max quantized coordinate |
 | `EOS_COORD` | 128 | Face sequence end marker |
-| `TRI_PAD` | 129 | Triangle prefix in 12-token block |
-| `EOS_RESIDUAL` | 255 | No-neighbor sentinel (residual target) |
+| `TRI_PAD` | 129 | Triangle trailing pad in 12-token block; also the edge-cond slot-2 triangle marker |
+| `EOS_RESIDUAL` | 255 | Slot-1 STOP: no neighbor (residual target) |
 
-Vocab size expands from 256 → **257** to accommodate `TRI_PAD`.
+Vocab size is **256** (indices 0–255): coordinates 0–127, `EOS_COORD`=128, `TRI_PAD`=129, and `EOS_RESIDUAL`=255. The edge-cond slot-2 triangle case reuses `TRI_PAD`, so no dedicated marker token is needed.
 
 ### Unified 12-token face block
 
 Both triangles and quads are encoded into a fixed 12-token sequence:
 
 ```
-Triangle: [TRI_PAD, TRI_PAD, TRI_PAD, v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z]
-Quad:     [v0x,     v0y,     v0z,     v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z]
+Triangle: [v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z, TRI_PAD, TRI_PAD, TRI_PAD]
+Quad:     [v0x, v0y, v0z, v1x, v1y, v1z, v2x, v2y, v2z, v3x,     v3y,     v3z]
 ```
 
 `TRI_PAD = 129 > QUANT_MAX = 127`, so it cannot be confused with a coordinate token.

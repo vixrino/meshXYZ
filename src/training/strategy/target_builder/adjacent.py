@@ -4,7 +4,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from ....constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_NEIGHBOR, TRI_PAD
+from ....constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_PAD
 from ....dataset.types import Batch
 from .base import BaseTargetBuilder
 
@@ -24,19 +24,20 @@ class AdjacentTargetBuilder(BaseTargetBuilder):
         vertex.  Target: positions 0-5 = PAD (edge), positions 6-8 = unique vertex
         or EOS_RESIDUAL when there is no neighbor.
 
-    12-token (unified quad/tri, Option-A hierarchical EOS)
-        A quad neighbor contributes 2 unique vertices, a triangle neighbor 1.
+    12-token (unified quad/tri)
+        The MLP always predicts two vertex slots; a quad neighbor fills both with
+        coords, a triangle neighbor fills slot 2 with TRI_PAD (the same padding
+        token used in the input — it flows naturally to the output).
         Target layout: positions 0-5 = PAD (edge), positions 6-8 = v1, 9-11 = v2.
-            no neighbor    → 6-8 = EOS_RESIDUAL, 9-11 = PAD          ("STOP this edge")
-            triangle nbr   → 6-8 = unique vertex, 9-11 = TRI_NEIGHBOR ("no v2")
+            no neighbor    → 6-8 = EOS_RESIDUAL, 9-11 = PAD     ("STOP this edge")
+            triangle nbr   → 6-8 = unique vertex, 9-11 = TRI_PAD ("2nd vertex is pad")
             quad neighbor  → 6-8 = v1, 9-11 = v2
         Read order at generation: slot1 EOS_RESIDUAL ⇒ stop; else slot2
-        TRI_NEIGHBOR ⇒ triangle; else quad.
+        TRI_PAD ⇒ triangle; else quad.
 
-        Slot 1 and slot 2 use DISTINCT sentinels (STOP = EOS_RESIDUAL,
-        TRI_NEIGHBOR for "triangle neighbor").  They were once both EOS_RESIDUAL,
-        which let the slot-1 stop signal bleed into slot 2 and collapse quads to
-        triangles — see constants.TRI_NEIGHBOR.  Do not merge them.
+        EOS_RESIDUAL is purely the slot-1 STOP; the slot-2 triangle case reuses
+        TRI_PAD.  The two never share a slot (STOP only in slot 1, TRI_PAD only in
+        slot 2), so a single shared softmax class never controls both decisions.
 
         Vertex ordering (winding).  The two unique quad vertices are ordered so
         that [ev0, ev1, v1, v2] is a valid 4-cycle regardless of how the shared
@@ -194,7 +195,7 @@ class AdjacentTargetBuilder(BaseTargetBuilder):
         cyclically adjacent to ev0, so [ev0, ev1, v1, v2] is a valid 4-cycle for
         any lex-sort direction of the shared edge.
         Triangle neighbor: returns (v1, *) where v1 is the single unique vertex;
-        v2 is unused (the caller writes EOS_RESIDUAL into slot 2).
+        v2 is unused (the caller writes TRI_PAD into slot 2).
         """
         BN = tgt_coords.shape[0] * tgt_coords.shape[1]
         nb = tgt_coords.reshape(BN, 4, 3)                       # trailing slot == TRI_PAD for triangles
@@ -246,15 +247,16 @@ class AdjacentTargetBuilder(BaseTargetBuilder):
         BN    = B * N
         has_t = has_target.reshape(BN)
         stop3 = torch.full((BN, 3), EOS_RESIDUAL, dtype=dt, device=dev)  # slot-1 "STOP"
-        tri3  = torch.full((BN, 3), TRI_NEIGHBOR, dtype=dt, device=dev)  # slot-2 "triangle nbr"
+        tri3  = torch.full((BN, 3), TRI_PAD,      dtype=dt, device=dev)  # slot-2 triangle pad
         pad3  = torch.full((BN, 3), PAD_TARGET,   dtype=dt, device=dev)
 
         out = torch.full((BN, 12), PAD_TARGET, dtype=dt, device=dev)
         # slot 1 (6-8): unique vertex v1 when there is a neighbor, else STOP (EOS_RESIDUAL).
         out[:, 6:9] = torch.where(has_t.unsqueeze(-1), v1, stop3)
-        # slot 2 (9-11): triangle neighbor → TRI_NEIGHBOR marker; quad neighbor → v2;
-        #                no neighbor → PAD (ignored).  Distinct from the slot-1 STOP
-        #                token so the two decisions never share a softmax class.
+        # slot 2 (9-11): triangle neighbor → TRI_PAD (the padding 2nd vertex); quad
+        #                neighbor → v2; no neighbor → PAD (ignored, not supervised).
+        #                TRI_PAD is the actively-predicted target for triangles, so the
+        #                model learns to emit it (loss_tri_pad captures it).
         slot2 = torch.where(nb_is_tri.unsqueeze(-1), tri3, v2)
         slot2 = torch.where(has_t.unsqueeze(-1), slot2, pad3)
         out[:, 9:12] = slot2

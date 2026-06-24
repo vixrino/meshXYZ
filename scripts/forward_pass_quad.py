@@ -2,7 +2,7 @@
 
 Instantiates a Decoder (quad config) with random weights, runs one forward
 pass with synthetic 12-token faces, and verifies the output shape is
-(B, F, 12, 257).  No training, no encoder, no gradient.
+(B, F, 12, 256).  No training, no encoder, no gradient.
 
 Usage
 -----
@@ -24,7 +24,7 @@ cfg = DecoderCfg(
     n_layers=2,
     n_heads=2,
     max_faces=256,
-    vocab_size=257,
+    vocab_size=256,
     n_face_tokens=12,
     use_pos_embed=False,
     use_spherical_embed=False,
@@ -47,7 +47,7 @@ with torch.no_grad():
     logits = decoder(C, faces)
 
 # ── Shape assertion ────────────────────────────────────────────────────────
-expected = (B, F, 12, 257)
+expected = (B, F, 12, 256)
 assert logits.shape == expected, f"Shape mismatch: got {tuple(logits.shape)}, expected {expected}"
 
 print("=" * 60)

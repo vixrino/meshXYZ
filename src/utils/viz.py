@@ -14,9 +14,8 @@ ZOOM_FRACTION = 0.25  # fraction of the global mesh extent shown around the quer
 EOS_RESIDUAL = 255    # matches constants.EOS_RESIDUAL
 COLOR_THRESHOLD = 16.0  # error (in quant steps) at which prediction colour saturates to blue
 
-_TRI_PAD = 129  # matches constants.TRI_PAD — sentinel in unified 12-token block
-_TRI_NEIGHBOR = 256  # matches constants.TRI_NEIGHBOR — slot-2 "triangle neighbor" marker
-                     # (distinct from EOS_RESIDUAL=255, the slot-1 STOP marker)
+_TRI_PAD = 129  # matches constants.TRI_PAD — padding token of the unified 12-token block;
+                # also the edge-cond slot-2 marker for a triangle neighbor
 
 
 def _rotation_matrix(azimuth_deg: float = 45.0, elevation_deg: float = 30.0) -> np.ndarray:
@@ -375,7 +374,7 @@ def _reconstruct_faces_12(
             pred_faces[i, 6:9] = EOS_RESIDUAL
             continue
         ev0, ev1 = query_edges[i, :3], query_edges[i, 3:]
-        if (gt_v2 == _TRI_NEIGHBOR).any():                # triangle neighbor (slot-2 marker)
+        if (gt_v2 == _TRI_PAD).any():                     # triangle neighbor (slot-2 pad)
             gt_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, gt_v1, np.full(3, _TRI_PAD)]))
         else:                                              # quad neighbor
             gt_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, gt_v1, gt_v2]))
@@ -383,7 +382,7 @@ def _reconstruct_faces_12(
         pv1, pv2 = raw_preds[i, 6:9], raw_preds[i, 9:12]
         if (pv1 == EOS_RESIDUAL).any():                   # slot-1 STOP
             pred_faces[i, 6:9] = EOS_RESIDUAL
-        elif (pv2 == _TRI_NEIGHBOR).any():                # slot-2 triangle marker
+        elif (pv2 == _TRI_PAD).any():                     # slot-2 triangle pad
             pred_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, np.clip(pv1, 0, 127), np.full(3, _TRI_PAD)]))
         else:
             pred_faces[i] = _canonical_face_12_np(np.concatenate([ev0, ev1, np.clip(pv1, 0, 127), np.clip(pv2, 0, 127)]))

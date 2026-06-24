@@ -21,7 +21,7 @@ torch = pytest.importorskip("torch")
 from src.constants import EOS_RESIDUAL, QUANT_MAX, TRI_PAD
 from src.model.decoder import MLP, Decoder, DecoderCfg
 
-VOCAB = 257
+VOCAB = 256
 N_REL = 2 * QUANT_MAX + 1   # 255 — first residual slot index that is NOT remapped
 
 

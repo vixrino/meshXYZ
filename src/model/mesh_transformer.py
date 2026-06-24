@@ -8,7 +8,7 @@ from torch import Tensor
 
 from .decoder import Decoder, DecoderCfg
 from .encoder import ENCODER_ARCH, EncoderCfg, KLAutoEncoder
-from ..constants import EOS_COORD, EOS_RESIDUAL, QUANT_MAX, TRI_NEIGHBOR, TRI_PAD
+from ..constants import EOS_COORD, EOS_RESIDUAL, QUANT_MAX, TRI_PAD
 from ..utils.geometry import canonical_face, canonical_face_12
 
 
@@ -185,18 +185,16 @@ class MeshTransformer(nn.Module):
                         new_face = canonical_face(torch.stack([ev0, ev1, pred.clamp(0, QUANT_MAX)]))
                         conf_coords, conf_pred = coord_logits, pred
                     else:
-                        # 12-token unified, Option-A hierarchical EOS.
-                        # Slot 1 and slot 2 carry DISTINCT sentinels:
+                        # 12-token unified, hierarchical read on the two predicted slots:
                         #   slot 1 == EOS_RESIDUAL → STOP (no neighbor on this edge)
-                        #   slot 2 == TRI_NEIGHBOR → neighbor is a triangle (no v2)
-                        # They are different tokens on purpose (see constants.TRI_NEIGHBOR);
-                        # never treat EOS_RESIDUAL in slot 2 as "triangle".
+                        #   slot 2 == TRI_PAD      → neighbor is a triangle (2nd vertex is pad)
+                        # EOS_RESIDUAL is only ever a slot-1 stop; TRI_PAD only a slot-2 pad.
                         v1, v2 = pred[0:3], pred[3:6]
                         if (v1 == EOS_RESIDUAL).any():               # slot 1 STOP → stop edge
                             eos_count += 1
                             eos_edges.add(edge_key)
                             continue
-                        if (v2 == TRI_NEIGHBOR).any():               # slot 2 TRI_NEIGHBOR → triangle neighbor
+                        if (v2 == TRI_PAD).any():                    # slot 2 TRI_PAD → triangle neighbor
                             tri = torch.stack([ev0, ev1, v1.clamp(0, QUANT_MAX)]).reshape(9)
                             pad = curr_faces.new_full((3,), TRI_PAD)
                             new_face = canonical_face_12(torch.cat([tri, pad]))  # pad at the END

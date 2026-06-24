@@ -52,7 +52,7 @@ DECODER_CFG = DecoderCfg(
     n_layers          = 4,      # 2 was insufficient for context-dependent tri/quad discrimination
     n_heads           = 4,      # must divide d_hidden
     max_faces         = 512,
-    vocab_size        = 257,    # 0-127 coords + 128 EOS_COORD + 129 TRI_PAD + ... + 255 EOS_RESIDUAL
+    vocab_size        = 256,    # 0-127 coords + 128 EOS_COORD + 129 TRI_PAD + ... + 255 EOS_RESIDUAL
     n_face_tokens     = 12,     # unified quad/tri block
     use_pos_embed     = True,
     use_spherical_embed = False,
@@ -169,7 +169,7 @@ def main() -> None:
         null_C = torch.zeros(B, 1, DECODER_CFG.d_latent, device=DEVICE)
 
         # Forward
-        logits = decoder(null_C, faces, token_mask=token_mask)   # (B, F, 12, 257)
+        logits = decoder(null_C, faces, token_mask=token_mask)   # (B, F, 12, 256)
 
         # Causal targets: for face q, predict face q+1 (EOS for the last)
         pseudo_batch = {"faces": faces, "lengths": lengths}

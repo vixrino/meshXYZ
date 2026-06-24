@@ -5,7 +5,7 @@ import torch.nn as nn
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from ..constants import EOS_RESIDUAL, QUANT_MAX, TRI_NEIGHBOR, TRI_PAD
+from ..constants import EOS_RESIDUAL, QUANT_MAX, TRI_PAD
 from ..utils.geometry import face_cartesian_to_spherical
 
 
@@ -32,8 +32,9 @@ class MLP(nn.Module):
                          occupies 6 coord slots, so the head predicts
                          n_face_tokens - 6 coords:
                            n_face_tokens=9  → 3 (1 new vertex; triangle neighbor)
-                           n_face_tokens=12 → 6 (up to 2 new vertices; quad neighbor,
-                                                 or 1 vertex + EOS marker for a tri).
+                           n_face_tokens=12 → 6 (always 2 vertex slots; quad neighbor
+                                                 = 2 coords, triangle neighbor = 1 coord
+                                                 + TRI_PAD in slot 2).
     use_edge_cond=False: predicts all n_face_tokens coordinate slots of the face.
                          Works for n_face_tokens=9 (triangle) or 12 (unified quad/tri).
     """
@@ -73,15 +74,22 @@ class MLP(nn.Module):
 
         anchor is repeated to cover all n_coords (works for n_coords=3, 9 or 12).
 
-        is_tri (12-token unified layout only): bool mask, True for triangle faces.
-        A triangle's positions 9-11 hold TRI_PAD=129 (padding moved to the END of
-        the block), which falls in the remapping dead-zone [n_abs, n_rel_coords)
-        that is forced to -inf below — so it could never be predicted.  For those
-        rows the trailing pad positions are restored to the raw (un-remapped)
-        absolute-vocab logits, leaving TRI_PAD predictable; coordinate positions
-        0-8 are still remapped relative to the anchor.
-        When is_tri is None (9-token tri-only / quad coord positions) the behaviour
-        is unchanged.
+        TRI_PAD=129 falls in the remapping dead-zone [n_abs, n_rel_coords) that is
+        forced to -inf below, so it could never be predicted.  Two paths un-mask it:
+
+        - Whole-face mode (n_coords == 12, is_tri given): a triangle's trailing pad
+          positions 9-11 are restored to the raw absolute-vocab logits so TRI_PAD is
+          predictable there; coordinate positions 0-8 stay remapped to the anchor.
+          When is_tri is None (9-token tri-only) the behaviour is unchanged.
+
+        - Edge-cond 12-token mode (n_coords == 6: the 6 shared-edge coords are already
+          stripped, local 0-2 = slot-1 vertex, local 3-5 = slot-2 vertex).  The slot-2
+          vertex of a triangle neighbor is TRI_PAD (the MLP always predicts 2 vertices;
+          for a triangle the 2nd is padding).  Exactly the TRI_PAD class is un-masked at
+          the slot-2 positions — not a full passthrough — so remapped absolute coords
+          (quad neighbor) and the tail passthrough (EOS_RESIDUAL stop) stay intact.  Not
+          gated on is_tri: the *neighbor* face-type is what the model learns to predict.
+          9-token edge-cond (n_coords == 3) is untouched.
         """
         BN, n_coords, _ = rel_logits.shape
         n_abs        = QUANT_MAX + 1       # absolute coordinate slots: [0, QUANT_MAX]
@@ -105,6 +113,13 @@ class MLP(nn.Module):
             pad_pos[9:] = True   # TRI_PAD positions of a triangle face (end of block)
             keep_raw = is_tri.view(BN, 1, 1) & pad_pos.view(1, n_coords, 1)
             out = torch.where(keep_raw, rel_logits, out)
+
+        if n_coords == 6:
+            # Edge-cond 12-token: un-mask TRI_PAD at slot 2 (local 3-5 → face positions
+            # 9-11) so a triangle neighbor's padding 2nd vertex is predictable.  Surgical
+            # (one class only): coords stay remapped for quad neighbors, EOS stays
+            # passthrough for the slot-1 stop.
+            out[:, 3:6, TRI_PAD] = rel_logits[:, 3:6, TRI_PAD]
 
         return out
 
@@ -163,18 +178,19 @@ class Decoder(nn.Module):
         # dead-zone.  All it requires is a vocab large enough to hold the TRI_PAD
         # and EOS_RESIDUAL classes.
         if cfg.relative and cfg.n_face_tokens == 12:
-            # Highest target class in 12-token edge-cond mode is TRI_NEIGHBOR (256),
-            # the slot-2 triangle marker (distinct from the slot-1 STOP=EOS_RESIDUAL).
-            # vocab_size=257 already covers it (index 256), so no output-dim change.
-            assert cfg.vocab_size > TRI_NEIGHBOR, (
-                "relative=True with n_face_tokens=12 needs vocab_size > TRI_NEIGHBOR "
-                f"({TRI_NEIGHBOR}) so TRI_PAD/EOS_RESIDUAL/TRI_NEIGHBOR classes are "
-                f"representable; got vocab_size={cfg.vocab_size}."
+            # Highest live class is EOS_RESIDUAL (255), the slot-1 STOP.  The slot-2
+            # triangle marker is TRI_PAD (129), un-masked out of the residual dead-zone
+            # at the slot-2 positions by _rel_to_abs_logits.  vocab_size=256 covers
+            # EOS_RESIDUAL (index 255), which is all that is required.
+            assert cfg.vocab_size > EOS_RESIDUAL, (
+                "relative=True with n_face_tokens=12 needs vocab_size > EOS_RESIDUAL "
+                f"({EOS_RESIDUAL}) so TRI_PAD/EOS_RESIDUAL classes are representable; "
+                f"got vocab_size={cfg.vocab_size}."
             )
         # use_edge_cond=True pads positions 0-5 (shared edge, 2×3 coords) and predicts
         # the remaining slots: 3 for n_face_tokens=9 (1 new vertex of a triangle
-        # neighbor) or 6 for n_face_tokens=12 (up to 2 new vertices of a quad
-        # neighbor; a triangle neighbor uses 1 vertex + an EOS marker in slot 2).
+        # neighbor) or 6 for n_face_tokens=12 (always 2 vertex slots: a quad neighbor
+        # fills both with coords, a triangle neighbor fills slot 2 with TRI_PAD).
         assert not (cfg.use_edge_cond and cfg.n_face_tokens not in (9, 12)), (
             "use_edge_cond=True supports n_face_tokens=9 (6 edge pad + 3 predicted) "
             "or 12 (6 edge pad + 6 predicted). "

@@ -85,7 +85,7 @@ cfg = MeshTransformerCfg(
         n_layers=2,
         n_heads=2,
         max_faces=256,
-        vocab_size=257,
+        vocab_size=256,
         n_face_tokens=12,
         use_pos_embed=False,
         use_spherical_embed=False,
@@ -177,9 +177,9 @@ with torch.no_grad():
 fwd_time = time.time() - t0
 
 print(f"  model.forward() in {fwd_time:.2f}s")
-print(f"  logits.shape  = {tuple(logits.shape)}   ← expect (1, {F}, 12, 257)")
-assert logits.shape == (1, F, 12, 257), f"Shape mismatch: {logits.shape}"
-print(f"  ✓  (1, F={F}, 12, 257)")
+print(f"  logits.shape  = {tuple(logits.shape)}   ← expect (1, {F}, 12, 256)")
+assert logits.shape == (1, F, 12, 256), f"Shape mismatch: {logits.shape}"
+print(f"  ✓  (1, F={F}, 12, 256)")
 print()
 
 # ── 3. Argmax distribution ────────────────────────────────────────────────

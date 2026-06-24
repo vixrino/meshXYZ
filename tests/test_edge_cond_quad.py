@@ -1,9 +1,10 @@
 """Tests for edge-conditioned target building & decoding with the 12-token layout.
 
-Option A (hierarchical EOS): for each query edge the model predicts up to two new
-vertices.  Target slot layout (positions): 0-5 = PAD (edge), 6-8 = v1, 9-11 = v2.
-    no neighbor    → 6-8 = EOS_RESIDUAL, 9-11 = PAD          ("stop this edge")
-    triangle nbr   → 6-8 = unique vertex, 9-11 = EOS_RESIDUAL ("no v2")
+The MLP always predicts two vertex slots; a quad fills both with coords, a triangle
+fills slot 2 with TRI_PAD.  Target slot layout (positions): 0-5 = PAD (edge),
+6-8 = v1, 9-11 = v2.
+    no neighbor    → 6-8 = EOS_RESIDUAL, 9-11 = PAD     ("stop this edge")
+    triangle nbr   → 6-8 = unique vertex, 9-11 = TRI_PAD ("2nd vertex is pad")
     quad neighbor  → 6-8 = v1, 9-11 = v2
 
 Vertex ordering: v1 is cyclically adjacent to ev1, v2 to ev0, so [ev0,ev1,v1,v2]
@@ -16,7 +17,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_NEIGHBOR, TRI_PAD
+from src.constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_PAD
 from src.model.decoder import MLP, Decoder, DecoderCfg
 from src.training.loss import edge_face_type_acc, edge_face_type_recall
 from src.training.strategy.target_builder.adjacent import (
@@ -68,9 +69,9 @@ def test_triangle_neighbor_target():
     tgt, _ = _builder().compute_targets(_batch(faces, neighbors), _mask(2, [(0, 1)]))
 
     assert tgt[0, 0, 6:9].tolist()  == E                          # single unique vertex
-    # slot-2 "triangle neighbor" marker — distinct from the slot-1 STOP (EOS_RESIDUAL).
-    assert tgt[0, 0, 9:12].tolist() == [TRI_NEIGHBOR] * 3
-    assert (tgt[0, 0, 9:12] != EOS_RESIDUAL).all()               # never the STOP token
+    # slot-2 triangle marker is the padding token TRI_PAD (the predicted 2nd "vertex").
+    assert tgt[0, 0, 9:12].tolist() == [TRI_PAD] * 3
+    assert (tgt[0, 0, 9:12] != EOS_RESIDUAL).all()               # never the slot-1 STOP token
 
 
 def test_no_neighbor_is_stop_eos():
@@ -112,23 +113,23 @@ def test_9token_path_unchanged():
     assert qe[0, 0].tolist() == Q + R                            # lex-sorted edge
     assert tgt[0, 0, 0:6].tolist() == [PAD_TARGET] * 6
     assert tgt[0, 0, 6:9].tolist() == S                         # the unique vertex
-    # Retro-compat: TRI_NEIGHBOR is a 12-token-only sentinel; it must never appear
-    # anywhere in the 9-token triangle path.
-    assert (tgt != TRI_NEIGHBOR).all()
+    # Retro-compat: TRI_PAD is a 12-token-only token; it must never appear anywhere
+    # in the 9-token triangle path.
+    assert (tgt != TRI_PAD).all()
 
 
 # ─────────────────────────── MLP / Decoder shapes ────────────────────────────
 
 def test_mlp_nout_scales_with_layout():
-    m9  = MLP(32, 257, use_edge_cond=True, relative=False, n_face_tokens=9)
-    m12 = MLP(32, 257, use_edge_cond=True, relative=False, n_face_tokens=12)
-    assert m9.net[-1].out_features  == 3 * 257                   # 1 new vertex
-    assert m12.net[-1].out_features == 6 * 257                   # up to 2 new vertices
+    m9  = MLP(32, 256, use_edge_cond=True, relative=False, n_face_tokens=9)
+    m12 = MLP(32, 256, use_edge_cond=True, relative=False, n_face_tokens=12)
+    assert m9.net[-1].out_features  == 3 * 256                   # 1 new vertex
+    assert m12.net[-1].out_features == 6 * 256                   # up to 2 new vertices
 
 
 def _cfg(**kw):
     base = dict(d_latent=8, d_hidden=32, n_layers=1, n_heads=2, max_faces=16,
-                vocab_size=257, n_face_tokens=12, use_pos_embed=False,
+                vocab_size=256, n_face_tokens=12, use_pos_embed=False,
                 use_spherical_embed=False, relative=False, use_edge_cond=True)
     base.update(kw)
     return DecoderCfg(**base)
@@ -142,8 +143,25 @@ def test_decoder_forward_edge_cond_12(relative):
     faces = torch.randint(0, QUANT_MAX + 1, (B, N, 12))
     qe = torch.randint(0, QUANT_MAX + 1, (B, N, 6))
     logits = dec(Cl, faces, query_edges=qe)
-    assert logits.shape == (B, N, 12, 257)
+    assert logits.shape == (B, N, 12, 256)
     # positions 0-5 are zero-padded (shared edge is not predicted)
+    assert torch.equal(logits[:, :, 0:6, :], torch.zeros_like(logits[:, :, 0:6, :]))
+
+
+def test_edge_cond_slot2_tri_pad_predictable_relative():
+    """relative edge-cond 12-token: _rel_to_abs_logits must un-mask TRI_PAD at slot 2
+    (positions 9-11) so a triangle neighbor's padding 2nd vertex is predictable — and
+    ONLY there.  Slot 1 (positions 6-8) stays dead-zoned (always a coord or the EOS
+    stop, never TRI_PAD), and the shared-edge positions 0-5 are zero-padded."""
+    dec = Decoder(_cfg(relative=True))
+    B, N = 1, 2
+    Cl = torch.randn(B, 4, 8)
+    faces = torch.randint(0, QUANT_MAX + 1, (B, N, 12))
+    qe    = torch.randint(0, QUANT_MAX + 1, (B, N, 6))
+    logits = dec(Cl, faces, query_edges=qe)
+
+    assert torch.isfinite(logits[:, :, 9:12, TRI_PAD]).all()      # slot 2: TRI_PAD predictable
+    assert torch.isinf(logits[:, :, 6:9,  TRI_PAD]).all()         # slot 1: TRI_PAD dead-zoned
     assert torch.equal(logits[:, :, 0:6, :], torch.zeros_like(logits[:, :, 0:6, :]))
 
 
@@ -155,22 +173,22 @@ def test_edge_cond_guard_rejects_bad_token_count():
 # ─────────────────────────── monitoring metric ───────────────────────────────
 
 def test_edge_face_type_acc_perfect_classification():
-    vocab = 257
+    vocab = 256
     targets = torch.full((1, 2, 12), PAD_TARGET, dtype=torch.long)
-    # face0 = quad neighbor (slot2 real coords); face1 = triangle neighbor (slot2 TRI_NEIGHBOR)
+    # face0 = quad neighbor (slot2 real coords); face1 = triangle neighbor (slot2 TRI_PAD)
     targets[0, 0, 6:9]  = torch.tensor([5, 6, 7])
     targets[0, 0, 9:12] = torch.tensor([8, 9, 10])
     targets[0, 1, 6:9]  = torch.tensor([11, 12, 13])
-    targets[0, 1, 9:12] = TRI_NEIGHBOR
+    targets[0, 1, 9:12] = TRI_PAD
 
     logits = torch.full((1, 2, 12, vocab), -10.0)
-    logits[0, 0, 9, 5] = 10.0                  # quad: pos9 argmax = coord (not TRI_NEIGHBOR)
-    logits[0, 1, 9, TRI_NEIGHBOR] = 10.0       # tri:  pos9 argmax = TRI_NEIGHBOR
+    logits[0, 0, 9, 5] = 10.0                  # quad: pos9 argmax = coord (not TRI_PAD)
+    logits[0, 1, 9, TRI_PAD] = 10.0            # tri:  pos9 argmax = TRI_PAD
     assert torch.isclose(edge_face_type_acc(logits, targets), torch.tensor(1.0))
 
-    # flip the quad prediction to TRI_NEIGHBOR → quad collapses to triangle → 0.5
+    # flip the quad prediction to TRI_PAD → quad collapses to triangle → 0.5
     logits[0, 0, 9, 5] = -10.0
-    logits[0, 0, 9, TRI_NEIGHBOR] = 10.0
+    logits[0, 0, 9, TRI_PAD] = 10.0
     assert torch.isclose(edge_face_type_acc(logits, targets), torch.tensor(0.5))
 
     # the recall split must localise it: quad_recall→0, tri_recall→1
