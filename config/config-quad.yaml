@@ -44,6 +44,15 @@ training:
                             # (e.g. 10) makes the model collapse to predicting EOS everywhere
                             # (coord_acc→0, edge_face_type_acc→tri-fraction). eos_weight>1 only
                             # made sense for the causal regime where EOS was <0.1% of tokens.
+  tri_neighbor_weight: 15   # Upweight TRI_PAD=129 (slot-2 triangle marker) in the cross-entropy.
+                            # Triangle neighbors are rare (~5 %, perc_tri_nb≈0.05), so TRI_PAD
+                            # never wins the argmax against coord logits → tri_recall stays at 0.
+                            # weight[TRI_PAD=129] and weight[EOS_RESIDUAL=255] are distinct indices
+                            # and coexist cleanly in the same weight vector.
+                            # Symmetric risk: too high → model over-predicts TRI_PAD →
+                            # quad_recall drops. Monitor BOTH tri_recall AND quad_recall.
+                            # Suggested sweep: 5 → 10 → 15 → 20; stop when quad_recall stays
+                            # ≥0.95 and tri_recall climbs above 0.5.
   mixed_precision: true
   masking:
     - type: causal

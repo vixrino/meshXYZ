@@ -19,7 +19,7 @@ torch = pytest.importorskip("torch")
 
 from src.constants import EOS_RESIDUAL, PAD_TARGET, QUANT_MAX, TRI_PAD
 from src.model.decoder import MLP, Decoder, DecoderCfg
-from src.training.loss import edge_face_type_acc, edge_face_type_recall
+from src.training.loss import edge_face_type_acc, edge_face_type_recall, reconstruction_loss
 from src.training.strategy.target_builder.adjacent import (
     AdjacentTargetBuilder,
     AdjacentTargetBuilderCfg,
@@ -202,3 +202,46 @@ def test_edge_face_type_acc_noop_on_9token():
     logits = torch.randn(1, 2, 9, 256)
     targets = torch.zeros(1, 2, 9, dtype=torch.long)
     assert torch.isclose(edge_face_type_acc(logits, targets), torch.tensor(1.0))
+
+
+# ─────────────── reconstruction_loss tri_neighbor_weight ────────────────────
+
+def test_tri_neighbor_weight_upweights_tri_pad_class():
+    """tri_neighbor_weight amplifies the gradient on TRI_PAD positions."""
+    vocab = 256
+    # One face with a single non-pad position targeting TRI_PAD.
+    logits  = torch.zeros(1, 1, 1, vocab)
+    targets = torch.full((1, 1, 1), PAD_TARGET, dtype=torch.long)
+    targets[0, 0, 0] = TRI_PAD
+
+    loss_base = reconstruction_loss(logits, targets, tri_neighbor_weight=1.0)
+    loss_up   = reconstruction_loss(logits, targets, tri_neighbor_weight=15.0)
+    # Upweighted loss must be strictly larger (gradient signal amplified).
+    assert loss_up > loss_base
+
+
+def test_tri_neighbor_weight_coexists_with_eos_weight():
+    """weight[TRI_PAD=129] and weight[EOS_RESIDUAL=255] occupy distinct indices."""
+    vocab = 256
+    # Two faces: one targets TRI_PAD, one targets EOS_RESIDUAL.
+    logits  = torch.zeros(1, 2, 1, vocab)
+    targets = torch.full((1, 2, 1), PAD_TARGET, dtype=torch.long)
+    targets[0, 0, 0] = TRI_PAD
+    targets[0, 1, 0] = EOS_RESIDUAL
+
+    # Both weights active simultaneously — must not crash and must differ from unweighted.
+    loss_both = reconstruction_loss(logits, targets, eos_weight=10.0, tri_neighbor_weight=15.0)
+    loss_none = reconstruction_loss(logits, targets, eos_weight=1.0,  tri_neighbor_weight=1.0)
+    assert loss_both > loss_none
+
+
+def test_tri_neighbor_weight_default_is_identity():
+    """Default tri_neighbor_weight=1.0 must be bit-identical to the unweighted path."""
+    vocab = 256
+    torch.manual_seed(0)
+    logits  = torch.randn(2, 3, 4, vocab)
+    targets = torch.randint(0, QUANT_MAX + 1, (2, 3, 4))
+
+    loss_default  = reconstruction_loss(logits, targets)
+    loss_explicit = reconstruction_loss(logits, targets, tri_neighbor_weight=1.0)
+    assert torch.isclose(loss_default, loss_explicit)

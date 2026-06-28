@@ -25,6 +25,7 @@ def reconstruction_loss(
     faces: Int[Tensor, "batch faces 9"] | None = None,
     pad_value: int = -1,
     eos_weight: float = 1.0,
+    tri_neighbor_weight: float = 1.0,
 ) -> Float[Tensor, ""]:
     """Cross-entropy loss over coordinate predictions.
 
@@ -38,6 +39,15 @@ def reconstruction_loss(
         and loss_eos drifts upward.  eos_weight > 1.0 upweights the EOS class to
         counteract this.  Default 1.0 reproduces the unweighted loss exactly
         (the weight tensor is all-ones), so triangle runs are bit-identical.
+
+    tri_neighbor_weight : float
+        Per-class weight applied to TRI_PAD (129) in the cross-entropy.  Triangle
+        neighbors are rare (~5 % of edge-cond slot-2 positions), so TRI_PAD never
+        wins the argmax against coord predictions.  Upweight it to force the model
+        to predict TRI_PAD for triangle neighbors.  Watch quad_recall alongside
+        tri_recall: if tri_neighbor_weight is too high the model over-predicts
+        TRI_PAD and quad_recall drops.  weight[TRI_PAD] and weight[EOS_RESIDUAL]
+        occupy distinct indices (129 vs 255) and coexist cleanly in the same vector.
     """
     if faces is not None:
         targets = targets.clone()
@@ -46,12 +56,13 @@ def reconstruction_loss(
     logits_flat  = logits.reshape(-1, vocab_size)
     targets_flat = targets.reshape(-1)
 
-    # Only build a weight tensor when needed; eos_weight=1.0 keeps the exact
+    # Only build a weight tensor when needed; both weights at 1.0 keeps the exact
     # same code path (weight=None) as before for backward compatibility.
     weight = None
-    if eos_weight != 1.0:
+    if eos_weight != 1.0 or tri_neighbor_weight != 1.0:
         weight = torch.ones(vocab_size, device=logits.device, dtype=logits.dtype)
         weight[EOS_RESIDUAL] = eos_weight
+        weight[TRI_PAD] = tri_neighbor_weight
 
     # ignore_index handles empty valid sets inside the CUDA kernel — no CPU-GPU sync.
     loss    = F.cross_entropy(logits_flat, targets_flat, weight=weight,

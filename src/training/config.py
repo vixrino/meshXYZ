@@ -16,6 +16,7 @@ class TrainingCfg:
     gen_max_ctx: int = 50
     gen_max_steps: int = 150
     eos_weight: float = 1.0
+    tri_neighbor_weight: float = 1.0
     masking: list = field(default_factory=list)
     target_builder: dict = field(default_factory=dict)
     ordering: dict = field(default_factory=lambda: {"strategies": [{"type": "canonical", "prob": 1.0}]})

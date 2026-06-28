@@ -43,7 +43,8 @@ class MeshTransformerModule(LightningModule):
         logits     = self.model(pc, batch["faces"], token_mask=token_mask, query_edges=query_edges)
 
         loss    = reconstruction_loss(logits, targets, faces=batch["faces"],
-                                      eos_weight=self.training_cfg.eos_weight)
+                                      eos_weight=self.training_cfg.eos_weight,
+                                      tri_neighbor_weight=self.training_cfg.tri_neighbor_weight)
         metrics = compute_metrics(logits, targets, faces=batch["faces"])
         self.log("train/loss", loss, prog_bar=False, on_step=True, on_epoch=False)
         self.log_dict({f"train/{k}": v for k, v in metrics.items()}, prog_bar=False, on_step=True, on_epoch=False)
