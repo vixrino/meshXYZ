@@ -29,7 +29,7 @@ def main(args: argparse.Namespace) -> None:
         ModelCheckpoint(
             dirpath=args.output_dir,
             every_n_train_steps=training_cfg.save_every,
-            save_last=True,
+            save_last=training_cfg.save_last,
             filename="step-{step}",
         ),
     ]

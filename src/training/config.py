@@ -20,3 +20,4 @@ class TrainingCfg:
     target_builder: dict = field(default_factory=dict)
     ordering: dict = field(default_factory=lambda: {"strategies": [{"type": "canonical", "prob": 1.0}]})
     pc_cond_prob: float = 1.0
+    save_last: bool = True
